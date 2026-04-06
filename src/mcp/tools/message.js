@@ -21,7 +21,7 @@ import {
     buildLinkCard,
     buildBigImageCard
 } from './helpers.js'
-import { recordSentMessage } from '../../utils/messageDedup.js'
+import { recordSentMessage, checkDuplicateToolSend, markToolSendCommitted } from '../../utils/messageDedup.js'
 import {
     ForwardMessageParser,
     IcqqMessageUtils,
@@ -29,62 +29,6 @@ import {
     NapCatMessageUtils,
     MsgRecordExtractor
 } from '../../utils/messageParser.js'
-
-const SEND_DEDUP_EXPIRE = 5000
-const recentSentMessages = new Map()
-/**
- * 生成消息发送的去重键
- * @param {Object} ctx - 上下文
- * @param {string} content - 消息内容
- * @returns {string}
- */
-function getSendDedupKey(ctx, content) {
-    const e = ctx?.getEvent?.() || {}
-    const groupId = e.group_id || ''
-    const userId = e.user_id || ''
-    // 取消息前100字符作为指纹
-    const contentFp = (content || '').substring(0, 100).trim()
-    return `${groupId}_${userId}_${contentFp}`
-}
-
-/**
- * 检查是否是重复发送（短时间内发送相同内容）
- * @param {Object} ctx - 上下文
- * @param {string} content - 消息内容
- * @returns {{ isDuplicate: boolean, count: number }}
- */
-function checkSendDuplicate(ctx, content) {
-    const key = getSendDedupKey(ctx, content)
-    const now = Date.now()
-
-    // 清理过期记录
-    for (const [k, v] of recentSentMessages) {
-        if (now - v.timestamp > SEND_DEDUP_EXPIRE) {
-            recentSentMessages.delete(k)
-        }
-    }
-
-    const existing = recentSentMessages.get(key)
-    if (existing && now - existing.timestamp < SEND_DEDUP_EXPIRE) {
-        existing.count++
-        existing.timestamp = now
-        return { isDuplicate: true, count: existing.count }
-    }
-
-    // 记录本次发送
-    recentSentMessages.set(key, { content, timestamp: now, count: 1 })
-    return { isDuplicate: false, count: 1 }
-}
-
-/**
- * 标记消息已发送（用于跨工具去重）
- * @param {Object} ctx - 上下文
- * @param {string} content - 消息内容
- */
-function markMessageSent(ctx, content) {
-    const key = getSendDedupKey(ctx, content)
-    recentSentMessages.set(key, { content, timestamp: Date.now(), count: 1 })
-}
 
 export const messageTools = [
     {
@@ -110,6 +54,11 @@ export const messageTools = [
                 const masters = await getMasterList(botId)
                 if (masters.length === 0) {
                     return { success: false, error: '未配置主人QQ，请在Yunzai配置中设置masterQQ' }
+                }
+                const masterDedupSig = `${!!args.all_masters}|${args.master_index ?? 0}|${args.message || ''}|${args.image_url || ''}`
+                const masterDedup = checkDuplicateToolSend(ctx, 'send_to_master', masterDedupSig)
+                if (masterDedup.isDuplicate) {
+                    return { success: false, error: `检测到重复发送(${masterDedup.count}次)，已跳过`, skipped: true }
                 }
                 const msgParts = []
                 if (args.message) msgParts.push(args.message)
@@ -272,7 +221,8 @@ export const messageTools = [
         },
         handler: async (args, ctx) => {
             try {
-                const dedupResult = checkSendDuplicate(ctx, args.message)
+                const pmSig = `${args.user_id}|${args.group_id || ''}|${args.message || ''}|${args.image_url || ''}`
+                const dedupResult = checkDuplicateToolSend(ctx, 'send_private_message', pmSig)
                 if (dedupResult.isDuplicate) {
                     return { success: false, error: `检测到重复发送(${dedupResult.count}次)，已跳过`, skipped: true }
                 }
@@ -440,8 +390,8 @@ export const messageTools = [
         },
         handler: async (args, ctx) => {
             try {
-                // 去重检查
-                const dedupResult = checkSendDuplicate(ctx, args.message)
+                const gmSig = `${args.group_id}|${args.at_user || ''}|${args.message || ''}|${args.image_url || ''}`
+                const dedupResult = checkDuplicateToolSend(ctx, 'send_group_message', gmSig)
                 if (dedupResult.isDuplicate) {
                     return { success: false, error: `检测到重复发送(${dedupResult.count}次)，已跳过`, skipped: true }
                 }
@@ -485,8 +435,8 @@ export const messageTools = [
         },
         handler: async (args, ctx) => {
             try {
-                // 去重检查
-                const dedupResult = checkSendDuplicate(ctx, args.message)
+                const replySig = `${args.message}|at:${!!args.at_sender}|q:${!!args.quote}`
+                const dedupResult = checkDuplicateToolSend(ctx, 'reply_current_message', replySig)
                 if (dedupResult.isDuplicate) {
                     return { success: false, error: `检测到重复发送(${dedupResult.count}次)，已跳过`, skipped: true }
                 }
@@ -519,77 +469,229 @@ export const messageTools = [
 
     {
         name: 'at_user',
-        description: '发送@用户的消息。支持通过QQ号、昵称查找，支持多次发送。',
+        description:
+            '发送@用户消息。支持 targets 数组（多人）、次数 count、模式 at_mode：together=同一条消息里一起@，separate=分多条逐个@（默认）。也兼容单参数 user_id / nickname。特殊值：sender、all、owner（群主）。',
         inputSchema: {
             type: 'object',
             properties: {
-                user_id: { type: 'string', description: '要@的用户QQ号，"sender"表示@发送者，"all"表示@全体' },
-                nickname: { type: 'string', description: '通过昵称/群名片查找用户（仅群聊）' },
-                message: { type: 'string', description: '附带的消息内容' },
-                count: { type: 'number', description: '发送次数，默认1次，最多10次', minimum: 1, maximum: 10 },
-                interval: { type: 'number', description: '多次发送间隔(ms)，默认500', minimum: 200 }
+                targets: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                        '要@的对象列表，每项可为QQ号、群昵称/名片，或 sender/@发送者、all/@全体、owner/群主。与 user_id、nickname 二选一，优先 targets'
+                },
+                user_id: {
+                    type: 'string',
+                    description: '单个目标QQ号；兼容旧参数。"sender"=发送者，"all"=全体，"owner"=群主'
+                },
+                nickname: { type: 'string', description: '通过昵称/群名片查找单个用户（仅群聊），兼容旧参数' },
+                message: { type: 'string', description: '附带文本（可选）' },
+                count: {
+                    type: 'number',
+                    description:
+                        '发送条数：together=含全部@的相同消息发送 count 次；separate=单目标时发 count 条，多目标时为重复轮数（每轮对每个目标各发一条），默认1，最多10',
+                    minimum: 1,
+                    maximum: 10
+                },
+                at_mode: {
+                    type: 'string',
+                    enum: ['together', 'separate'],
+                    description: 'together=一起@在同一条消息；separate=一个个分多条发（默认 separate）'
+                },
+                interval: { type: 'number', description: '多条发送间隔(ms)，默认500', minimum: 200 }
             }
         },
         handler: async (args, ctx) => {
             try {
-                // 去重检查
-                const dedupResult = checkSendDuplicate(ctx, args.message)
-                if (dedupResult.isDuplicate) {
-                    return { success: false, error: `检测到重复发送(${dedupResult.count}次)，已跳过`, skipped: true }
-                }
-
                 const e = ctx.getEvent()
                 const bot = ctx.getBot()
                 if (!e) {
                     return { success: false, error: '没有可用的会话上下文' }
                 }
 
-                let targetId = args.user_id
-                let matchedName = null
+                let targetList = []
+                if (Array.isArray(args.targets) && args.targets.length > 0) {
+                    targetList = args.targets.map(t => String(t).trim()).filter(Boolean)
+                } else if (args.user_id) {
+                    targetList = [String(args.user_id).trim()]
+                } else if (args.nickname) {
+                    targetList = [String(args.nickname).trim()]
+                }
 
-                // 通过昵称查找
-                if (args.nickname && e.group_id) {
-                    const memberList = await getGroupMemberList({ bot, event: e })
-                    const result = findMemberByName(memberList, args.nickname)
+                if (targetList.length === 0) {
+                    return { success: false, error: '必须提供 targets 数组，或 user_id，或 nickname' }
+                }
+                if (targetList.length > 10) {
+                    return { success: false, error: '最多同时指定 10 个 @ 目标' }
+                }
 
-                    if (result) {
-                        targetId = String(result.member.user_id || result.member.uid)
-                        matchedName = result.member.card || result.member.nickname || result.member.nick
-                    } else {
-                        return { success: false, error: `未找到昵称"${args.nickname}"的群成员` }
+                const atMode = args.at_mode === 'together' ? 'together' : 'separate'
+                const sendCount = Math.min(Math.max(Number(args.count) || 1, 1), 10)
+                const interval = Math.max(Number(args.interval) || 500, 200)
+
+                const resolveEntries = async () => {
+                    let memberList = null
+                    const ensureMembers = async () => {
+                        if (!memberList) {
+                            memberList = await getGroupMemberList({ bot, event: e })
+                        }
+                        return memberList
                     }
-                } else if (!targetId) {
-                    return { success: false, error: '必须提供 user_id 或 nickname 参数' }
+                    const out = []
+                    for (const raw of targetList) {
+                        const s = String(raw).trim()
+                        const lower = s.toLowerCase()
+                        if (lower === 'sender') {
+                            out.push({ id: String(e.user_id), matchedName: null })
+                            continue
+                        }
+                        if (lower === 'all') {
+                            if (!e.group_id) return { error: '@全体仅在群聊中有效' }
+                            out.push({ id: 'all', matchedName: null })
+                            continue
+                        }
+                        if (lower === 'owner') {
+                            if (!e.group_id) return { error: '查找群主仅在群聊中有效' }
+                            const ml = await ensureMembers()
+                            const owners = filterMembers(ml, { role: 'owner' })
+                            if (owners.length === 0) return { error: '未找到群主' }
+                            const o = owners[0]
+                            out.push({
+                                id: String(o.user_id || o.uid),
+                                matchedName: o.card || o.nickname || o.nick || ''
+                            })
+                            continue
+                        }
+                        if (/^\d+$/.test(s)) {
+                            out.push({ id: s, matchedName: null })
+                            continue
+                        }
+                        if (!e.group_id) return { error: `通过昵称「${s}」查找需要群聊上下文` }
+                        const ml = await ensureMembers()
+                        const result = findMemberByName(ml, s)
+                        if (!result) return { error: `未找到昵称「${s}」的群成员` }
+                        const m = result.member
+                        out.push({
+                            id: String(m.user_id || m.uid),
+                            matchedName: m.card || m.nickname || m.nick || ''
+                        })
+                    }
+                    return { resolved: out }
                 }
 
-                if (targetId === 'sender') targetId = e.user_id
+                const resolvedPack = await resolveEntries()
+                if (resolvedPack.error) {
+                    return { success: false, error: resolvedPack.error }
+                }
+                const resolved = resolvedPack.resolved
+                const ids = resolved.map(r => r.id)
 
-                const msgParts = []
-                if (targetId === 'all') {
-                    if (!e.group_id) return { success: false, error: '@全体仅在群聊中有效' }
-                    msgParts.push(segment.at('all'))
+                let totalPlanned = 0
+                if (atMode === 'together') {
+                    totalPlanned = sendCount
+                } else if (resolved.length === 1) {
+                    totalPlanned = sendCount
                 } else {
-                    msgParts.push(segment.at(targetId))
+                    totalPlanned = sendCount * resolved.length
                 }
-                if (args.message) msgParts.push(' ' + args.message)
+                if (totalPlanned > 30) {
+                    return {
+                        success: false,
+                        error: `计划发送 ${totalPlanned} 条消息，超过上限 30，请减少 count 或目标数量`
+                    }
+                }
 
-                const results = await batchSendMessages({
-                    event: e,
-                    messages: msgParts,
-                    count: args.count || 1,
-                    interval: args.interval || 500
-                })
+                // 去重：必须包含目标、模式、次数，避免仅依赖 message 导致空文案碰撞或误拦
+                const dedupContent = `${atMode}|${sendCount}|${ids.join(',')}|${args.message || ''}`
+                const dedupResult = checkDuplicateToolSend(ctx, 'at_user', dedupContent)
+                if (dedupResult.isDuplicate) {
+                    return { success: false, error: `检测到重复调用(${dedupResult.count}次)，已跳过`, skipped: true }
+                }
 
-                // 记录发送消息指纹
+                const buildSingleAtParts = id => {
+                    const parts = []
+                    if (id === 'all') {
+                        parts.push(segment.at('all'))
+                    } else {
+                        parts.push(segment.at(id))
+                    }
+                    if (args.message) parts.push(' ' + args.message)
+                    return parts
+                }
+
+                const buildTogetherParts = () => {
+                    const parts = []
+                    for (let idx = 0; idx < ids.length; idx++) {
+                        const id = ids[idx]
+                        if (id === 'all') parts.push(segment.at('all'))
+                        else parts.push(segment.at(id))
+                        if (idx < ids.length - 1) parts.push(' ')
+                    }
+                    if (args.message) {
+                        if (parts.length) parts.push(' ')
+                        parts.push(args.message.trim())
+                    }
+                    return parts
+                }
+
+                let results = []
+
+                if (atMode === 'together') {
+                    const msgParts = buildTogetherParts()
+                    results = await batchSendMessages({
+                        event: e,
+                        messages: msgParts,
+                        count: sendCount,
+                        interval
+                    })
+                } else if (resolved.length === 1) {
+                    const msgParts = buildSingleAtParts(ids[0])
+                    results = await batchSendMessages({
+                        event: e,
+                        messages: msgParts,
+                        count: sendCount,
+                        interval
+                    })
+                } else {
+                    for (let round = 0; round < sendCount; round++) {
+                        for (let i = 0; i < resolved.length; i++) {
+                            const msgParts = buildSingleAtParts(ids[i])
+                            try {
+                                const result = await e.reply(msgParts)
+                                results.push({
+                                    index: results.length + 1,
+                                    success: true,
+                                    message_id: result?.message_id,
+                                    round: round + 1,
+                                    at_target: ids[i]
+                                })
+                            } catch (err) {
+                                results.push({
+                                    index: results.length + 1,
+                                    success: false,
+                                    error: err.message,
+                                    round: round + 1,
+                                    at_target: ids[i]
+                                })
+                            }
+                            const isLast = round === sendCount - 1 && i === resolved.length - 1
+                            if (!isLast) await new Promise(r => setTimeout(r, interval))
+                        }
+                    }
+                }
+
                 if (args.message) recordSentMessage(args.message)
+                markToolSendCommitted(ctx, 'at_user', dedupContent)
 
                 const successCount = results.filter(r => r.success).length
                 return {
                     success: successCount > 0,
+                    at_mode: atMode,
                     total_count: results.length,
                     success_count: successCount,
-                    at_target: targetId,
-                    matched_name: matchedName,
+                    planned_sends: totalPlanned,
+                    at_targets: ids,
+                    matched_names: resolved.map(r => r.matchedName).filter(Boolean),
                     results: results.length > 1 ? results : undefined,
                     message_id: results[0]?.message_id
                 }
@@ -627,6 +729,12 @@ export const messageTools = [
                 const bot = ctx.getBot()
                 if (!e || !e.group_id) {
                     return { success: false, error: '此功能仅在群聊中有效' }
+                }
+
+                const roleDedupSig = `${args.role}|n:${args.count ?? 1}|sc:${args.send_count ?? 1}|${args.message || ''}|es:${!!args.exclude_self}|eb:${args.exclude_bot !== false}|iv:${args.interval ?? 500}`
+                const roleDedup = checkDuplicateToolSend(ctx, 'at_role', roleDedupSig)
+                if (roleDedup.isDuplicate) {
+                    return { success: false, error: `检测到重复发送(${roleDedup.count}次)，已跳过`, skipped: true }
                 }
 
                 const botId = bot.uin || bot.self_id
@@ -734,6 +842,12 @@ export const messageTools = [
                 const bot = ctx.getBot()
                 if (!e || !e.group_id) {
                     return { success: false, error: '此功能仅在群聊中有效' }
+                }
+
+                const raSig = `n:${args.count ?? 1}|${args.message || ''}|ea:${!!args.exclude_admin}|eo:${!!args.exclude_owner}|eb:${args.exclude_bot !== false}|es:${!!args.exclude_self}`
+                const raDedup = checkDuplicateToolSend(ctx, 'random_at', raSig)
+                if (raDedup.isDuplicate) {
+                    return { success: false, error: `检测到重复发送(${raDedup.count}次)，已跳过`, skipped: true }
                 }
 
                 const botId = bot.uin || bot.self_id

@@ -11,6 +11,91 @@ const processedMessageIds = new Map() // message_id -> timestamp
 const sentMessageFingerprints = new Map() // fingerprint -> timestamp (机器人发送的消息)
 const processingMessages = new Set() // 正在处理中的消息ID
 
+/** MCP/工具层短时间内相同发送意图去重（防模型重复 tool call、调度重入） */
+const TOOL_SEND_DEDUP_MS = 10000
+const MAX_TOOL_SEND_DEDUP = 1000
+const toolSendDedupMap = new Map()
+
+function cleanExpiredToolSendDedup() {
+    const now = Date.now()
+    for (const [k, v] of toolSendDedupMap) {
+        if (now - v.timestamp > TOOL_SEND_DEDUP_MS) {
+            toolSendDedupMap.delete(k)
+        }
+    }
+}
+
+function trimToolSendDedupIfNeeded() {
+    if (toolSendDedupMap.size <= MAX_TOOL_SEND_DEDUP) return
+    cleanExpiredToolSendDedup()
+    if (toolSendDedupMap.size <= MAX_TOOL_SEND_DEDUP) return
+    let removed = 0
+    for (const k of toolSendDedupMap.keys()) {
+        toolSendDedupMap.delete(k)
+        if (++removed > 300) break
+    }
+}
+
+/**
+ * @param {Object} ctx - MCP 上下文（需 getEvent / getBot）
+ * @param {string} toolName - 工具名
+ * @param {string} signature - 调用指纹（参数摘要，建议稳定排序）
+ * @returns {{ isDuplicate: boolean, count: number }}
+ */
+export function checkDuplicateToolSend(ctx, toolName, signature) {
+    cleanExpiredToolSendDedup()
+    trimToolSendDedupIfNeeded()
+
+    const e = ctx?.getEvent?.() || {}
+    let bot = ctx?.getBot?.() || e?.bot
+    try {
+        if (!bot && typeof Bot !== 'undefined') bot = Bot
+    } catch {
+        bot = null
+    }
+    const botId = String(bot?.uin || bot?.self_id || '')
+    const groupId = e.group_id != null ? String(e.group_id) : ''
+    const userId = e.user_id != null ? String(e.user_id) : ''
+    const fp = String(signature ?? '')
+        .substring(0, 400)
+        .trim()
+    const key = `${botId}|${groupId}|${userId}|${toolName}|${fp}`
+
+    const now = Date.now()
+    const existing = toolSendDedupMap.get(key)
+    if (existing && now - existing.timestamp < TOOL_SEND_DEDUP_MS) {
+        existing.count = (existing.count || 1) + 1
+        existing.timestamp = now
+        return { isDuplicate: true, count: existing.count }
+    }
+    toolSendDedupMap.set(key, { timestamp: now, count: 1 })
+    return { isDuplicate: false, count: 1 }
+}
+
+/**
+ * 成功后刷新指纹时间戳（可选；通常 checkDuplicateToolSend 已写入）
+ * @param {Object} ctx
+ * @param {string} toolName
+ * @param {string} signature
+ */
+export function markToolSendCommitted(ctx, toolName, signature) {
+    const e = ctx?.getEvent?.() || {}
+    let bot = ctx?.getBot?.() || e?.bot
+    try {
+        if (!bot && typeof Bot !== 'undefined') bot = Bot
+    } catch {
+        bot = null
+    }
+    const botId = String(bot?.uin || bot?.self_id || '')
+    const groupId = e.group_id != null ? String(e.group_id) : ''
+    const userId = e.user_id != null ? String(e.user_id) : ''
+    const fp = String(signature ?? '')
+        .substring(0, 400)
+        .trim()
+    const key = `${botId}|${groupId}|${userId}|${toolName}|${fp}`
+    toolSendDedupMap.set(key, { timestamp: Date.now(), count: 1 })
+}
+
 /**
  * 转义正则特殊字符
  * @param {string} str
@@ -351,6 +436,7 @@ export function cleanupAll() {
     cleanExpiredHashes()
     cleanExpiredMessageIds()
     cleanExpiredSentFingerprints()
+    cleanExpiredToolSendDedup()
 }
 
 /**
@@ -362,6 +448,7 @@ export function getStats() {
         hashCount: recentMessageHashes.size,
         messageIdCount: processedMessageIds.size,
         fingerprintCount: sentMessageFingerprints.size,
-        processingCount: processingMessages.size
+        processingCount: processingMessages.size,
+        toolSendDedupCount: toolSendDedupMap.size
     }
 }
