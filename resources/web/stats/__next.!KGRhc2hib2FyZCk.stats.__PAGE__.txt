@@ -1,9 +1,9 @@
 1:"$Sreact.fragment"
 2:I[47257,["/chatai/_next/static/chunks/ff1a16fafef87110.js","/chatai/_next/static/chunks/72662c7cbb0db441.js"],"ClientPageRoot"]
-3:I[96911,["/chatai/_next/static/chunks/6832f12efda05856.js","/chatai/_next/static/chunks/1382c7d6b231b71e.js","/chatai/_next/static/chunks/820b767735116e6c.js","/chatai/_next/static/chunks/ae1a2bb5d86f62da.js","/chatai/_next/static/chunks/5e4f45c1fa705157.js","/chatai/_next/static/chunks/058e3aa89cb761ad.js","/chatai/_next/static/chunks/9ca7f3a98f5aa79e.js","/chatai/_next/static/chunks/418da4aace44136c.js","/chatai/_next/static/chunks/ad056ac185778161.js","/chatai/_next/static/chunks/0675d3ba37e88d06.js","/chatai/_next/static/chunks/853def654c3654c0.js"],"default"]
+3:I[96911,["/chatai/_next/static/chunks/6832f12efda05856.js","/chatai/_next/static/chunks/1382c7d6b231b71e.js","/chatai/_next/static/chunks/820b767735116e6c.js","/chatai/_next/static/chunks/ae1a2bb5d86f62da.js","/chatai/_next/static/chunks/5e4f45c1fa705157.js","/chatai/_next/static/chunks/058e3aa89cb761ad.js","/chatai/_next/static/chunks/8aa6fb7d6240570f.js","/chatai/_next/static/chunks/f77501d211b75860.js","/chatai/_next/static/chunks/ad056ac185778161.js","/chatai/_next/static/chunks/0675d3ba37e88d06.js","/chatai/_next/static/chunks/853def654c3654c0.js"],"default"]
 6:I[97367,["/chatai/_next/static/chunks/ff1a16fafef87110.js","/chatai/_next/static/chunks/72662c7cbb0db441.js"],"OutletBoundary"]
 7:"$Sreact.suspense"
-0:{"buildId":"7tOyNQGdTY_GeRCF4Dc81","rsc":["$","$1","c",{"children":[["$","$L2",null,{"Component":"$3","serverProvidedParams":{"searchParams":{},"params":{},"promises":["$@4","$@5"]}}],[["$","script","script-0",{"src":"/chatai/_next/static/chunks/853def654c3654c0.js","async":true}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],"loading":null,"isPartial":false}
+0:{"buildId":"zVpkrNwy2_kkB09XB2UUK","rsc":["$","$1","c",{"children":[["$","$L2",null,{"Component":"$3","serverProvidedParams":{"searchParams":{},"params":{},"promises":["$@4","$@5"]}}],[["$","script","script-0",{"src":"/chatai/_next/static/chunks/853def654c3654c0.js","async":true}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],"loading":null,"isPartial":false}
 4:{}
 5:{}
 8:null
