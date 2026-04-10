@@ -16,6 +16,7 @@ import { isMaster } from '../src/utils/platformAdapter.js'
 import { generateGroupAdminLoginCode } from '../src/services/routes/groupAdminRoutes.js'
 import { getWebServer } from '../src/services/webServer.js'
 import { STOP_WORDS } from '../src/utils/common.js'
+import { contextManager } from '../src/services/llm/ContextManager.js'
 
 // Debug模式状态管理（运行时内存，重启后重置）
 const debugSessions = new Map() // key: groupId或`private_${userId}`, value: boolean
@@ -51,6 +52,36 @@ function setDebugMode(e, enabled) {
  */
 function getDebugSessions() {
     return debugSessions
+}
+
+/** 从画像分析用的消息中提取纯文本（用于解析群聊用户标签） */
+function getPortraitMessagePlainText(m) {
+    if (typeof m.content === 'string') return m.content
+    if (Array.isArray(m.content)) {
+        return m.content
+            .filter(c => c.type === 'text')
+            .map(c => c.text || '')
+            .join('')
+    }
+    return ''
+}
+
+/**
+ * 推断一条 user 消息归属的用户 ID（与 ChatService 群聊标签格式一致）
+ * @param {object} m
+ * @returns {string|null}
+ */
+function getStoredUserIdFromPortraitMessage(m) {
+    const meta = m.metadata
+    if (meta) {
+        const u = meta.userId ?? meta.user_id
+        if (u != null && String(u) !== '') return String(u)
+    }
+    if (m.sender?.user_id != null && String(m.sender.user_id) !== '') return String(m.sender.user_id)
+    const text = getPortraitMessagePlainText(m)
+    const labeled = text.match(/^\[([^\]]+)\((\d+)\)\]:\s*/)
+    if (labeled) return labeled[2]
+    return null
 }
 
 // AICommands 必须是第一个导出的类，确保被正确加载
@@ -1273,20 +1304,33 @@ ${dialogText}${truncatedNote}`
             await this.reply('正在分析用户画像...', true)
 
             databaseService.init()
+            await contextManager.init()
             const groupId = e.group_id
             const userId = e.user_id
             const nickname = e.sender?.nickname || '用户'
             const minMessages = config.get('features.userPortrait.minMessages') || 10
 
-            /* conversationId 格式与 ChatService 保持一致：群聊 group:${gid}，私聊 user:${uid} */
-            const conversationId = groupId ? `group:${groupId}` : `user:${userId}`
+            const userIdStr = String(userId).includes('_') ? String(userId).split('_').pop() : String(userId)
+            /* conversationId 与 ChatService / ContextManager 一致（含群用户隔离） */
+            const conversationId = contextManager.getConversationId(userIdStr, groupId ? String(groupId) : null)
             // 读取配置的消息数量限制 - 优先使用前端配置
             const maxMessages =
                 config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories') || 100
             const analyzeCount = Math.min(maxMessages, 100)
 
-            const allMessages = databaseService.getMessages(conversationId, maxMessages)
-            const userMessages = allMessages.filter(m => m.role === 'user')
+            const isolation = config.get('context.isolation') || {}
+            const groupUserIsolation = isolation.groupUserIsolation ?? false
+            const sharedGroupConv = groupId && !groupUserIsolation && conversationId === `group:${groupId}`
+            const fetchLimit = sharedGroupConv ? Math.min(maxMessages * 25, 2000) : maxMessages
+
+            const allMessages = databaseService.getMessages(conversationId, fetchLimit)
+            let userMessages = allMessages.filter(m => m.role === 'user')
+            if (sharedGroupConv) {
+                userMessages = userMessages.filter(m => {
+                    const sid = getStoredUserIdFromPortraitMessage(m)
+                    return sid != null && sid === userIdStr
+                })
+            }
 
             if (userMessages.length < minMessages) {
                 await this.reply(`消息数量不足（需要至少${minMessages}条），无法生成画像`, true)

@@ -105,6 +105,25 @@ const EDITABLE_ENV_FIELDS = [
 const EDITABLE_SESSION_FIELDS = ['relationship']
 
 /**
+ * 在线编辑接口返回的 gameData：与 /api/game-edit/session 一致，剥离 secret 等敏感字段
+ * @param {{ gameData?: { environment?: object, session?: object } }} session
+ */
+function toSafeGameDataForEditResponse(session) {
+    const env = session.gameData?.environment || {}
+    const safeEnvironment = { ...env }
+    delete safeEnvironment.secret
+    return {
+        environment: safeEnvironment,
+        session: {
+            affection: session.gameData.session?.affection,
+            trust: session.gameData.session?.trust,
+            gold: session.gameData.session?.gold,
+            relationship: session.gameData.session?.relationship
+        }
+    }
+}
+
+/**
  * 创建游戏路由
  * @param {Function} authMiddleware - 认证中间件
  * @returns {express.Router}
@@ -429,8 +448,7 @@ export function createGameRoutes(authMiddleware) {
                 return res.status(410).json(ChaiteResponse.fail(null, '编辑会话已过期'))
             }
 
-            // 过滤掉受保护字段的值，只显示但不可编辑
-            const safeData = { ...session.gameData }
+            const safeData = toSafeGameDataForEditResponse(session)
 
             res.json(
                 ChaiteResponse.ok({
@@ -635,19 +653,7 @@ export function createGameEditRoutes() {
                 return res.status(410).json(ChaiteResponse.fail(null, '编辑会话已过期'))
             }
 
-            // 过滤掉受保护的字段（如 secret）
-            const safeEnvironment = { ...session.gameData.environment }
-            delete safeEnvironment.secret
-
-            const safeGameData = {
-                environment: safeEnvironment,
-                session: {
-                    affection: session.gameData.session?.affection,
-                    trust: session.gameData.session?.trust,
-                    gold: session.gameData.session?.gold,
-                    relationship: session.gameData.session?.relationship
-                }
-            }
+            const safeGameData = toSafeGameDataForEditResponse(session)
 
             res.json(
                 ChaiteResponse.ok({
