@@ -190,7 +190,7 @@ export function setupAuthRoutes(app) {
                     sameSite: 'lax',
                     path: '/'
                 })
-                res.redirect(`/?auth_token=${jwtToken}`)
+                res.redirect('/')
             } else {
                 res.status(401).send('Invalid or expired token.')
             }

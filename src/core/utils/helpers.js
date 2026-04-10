@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { DefaultLogger } from '../types/common.js'
 
 // Round-robin 计数器
@@ -61,35 +62,7 @@ export function extractClassName(code) {
     return classMatch ? classMatch[1] : null
 }
 
-/**
- * Simple async local storage implementation
- */
-class AsyncLocalStorage {
-    constructor() {
-        this.store = new Map()
-    }
-
-    /**
-     * @param {any} store
-     * @param {Function} callback
-     */
-    async run(store, callback) {
-        const id = crypto.randomUUID()
-        this.store.set(id, store)
-        try {
-            return await callback()
-        } finally {
-            this.store.delete(id)
-        }
-    }
-
-    getStore() {
-        // Return the most recent store
-        const values = Array.from(this.store.values())
-        return values[values.length - 1]
-    }
-}
-
+/** Node 官方 AsyncLocalStorage，保证异步边界内 getStore() 与并发 run 不串台 */
 export const asyncLocalStorage = new AsyncLocalStorage()
 
 export { DefaultLogger }

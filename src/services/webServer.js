@@ -370,13 +370,8 @@ class WebServer {
                     path: mountPath
                 })
 
-                // 返回一个中间页面，确保cookie被正确设置后再跳转
-                return res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>登录中...</title>
-<script>
-localStorage.setItem('chatai_token', '${jwtToken}');
-window.location.href = '${mountPath}/';
-</script></head><body>正在登录...</body></html>`)
+                /* 不在 HTML/URL 中嵌入 JWT，避免 Referer/日志/XSS 扩大泄露面；前端凭 Cookie + withCredentials 访问 API */
+                return res.redirect(302, `${mountPath}/`)
             }
             res.redirect(`${mountPath}/login/?error=invalid_token`)
         })
@@ -421,8 +416,8 @@ window.location.href = '${mountPath}/';
             }
         })
 
-        this.router.get('/api/auth/verify-token', async (req, res) => {
-            const { token } = req.query
+        const handleVerifyTempToken = async (req, res) => {
+            const token = req.method === 'POST' ? req.body?.token : req.query?.token
             const clientFingerprint = req.headers['x-client-fingerprint']
 
             try {
@@ -450,7 +445,10 @@ window.location.href = '${mountPath}/';
             } catch (error) {
                 res.status(500).json(ChaiteResponse.fail(null, error.message))
             }
-        })
+        }
+
+        this.router.get('/api/auth/verify-token', handleVerifyTempToken)
+        this.router.post('/api/auth/verify-token', handleVerifyTempToken)
 
         this.router.get('/api/auth/status', auth, (req, res) => {
             res.json(ChaiteResponse.ok({ authenticated: true }))
