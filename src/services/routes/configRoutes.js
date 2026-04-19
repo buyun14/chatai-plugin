@@ -5,6 +5,7 @@ import express from 'express'
 import config from '../../../config/config.js'
 import { ChaiteResponse } from './shared.js'
 import { chatLogger } from '../../core/utils/logger.js'
+import { groupSummaryPushService } from '../group/GroupSummaryPushService.js'
 
 const router = express.Router()
 
@@ -89,6 +90,14 @@ router.post('/', async (req, res) => {
         // 所有更新完成后，一次性保存到文件
         config.save()
         chatLogger.debug('[WebServer] 配置已保存')
+
+        // 如果更新了推送相关配置，重载推送服务
+        if (updates.features?.groupSummary?.push !== undefined) {
+            try {
+                groupSummaryPushService.reload()
+            } catch {}
+        }
+
         res.json(ChaiteResponse.ok({ success: true }))
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))

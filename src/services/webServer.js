@@ -148,6 +148,7 @@ import {
     ChaiteResponse
 } from './routes/index.js'
 import { nlSchedulerService } from './scheduler/NLSchedulerService.js'
+import { groupSummaryPushService } from './group/GroupSummaryPushService.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -621,6 +622,11 @@ class WebServer {
         // 异步启动自然语言定时任务服务
         nlSchedulerService.init().catch(err => {
             chatLogger.warn('[WebServer] 定时任务服务启动失败:', err.message)
+        })
+
+        // 异步启动群聊总结定时推送服务
+        groupSummaryPushService.init().catch(err => {
+            chatLogger.warn('[WebServer] 群聊总结推送服务启动失败:', err.message)
         })
 
         return { port: this.port }

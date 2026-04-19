@@ -10,6 +10,7 @@ import { ChaiteResponse, getDatabase } from './shared.js'
 import { getScopeManager } from '../scope/ScopeManager.js'
 import { chatLogger } from '../../core/utils/logger.js'
 import config from '../../../config/config.js'
+import { groupSummaryPushService } from '../group/GroupSummaryPushService.js'
 
 const router = express.Router()
 
@@ -735,6 +736,13 @@ router.put('/config', groupAdminAuth, async (req, res) => {
         })
 
         await scopeManager.setGroupSettings(groupId, updateData)
+
+        // 如果更新了推送配置，重载推送服务调度
+        if (updateData.summaryPushEnabled !== undefined) {
+            try {
+                groupSummaryPushService.reload()
+            } catch {}
+        }
 
         chatLogger.info(`[GroupAdmin] 群 ${groupId} 配置已更新 (操作者: ${req.groupAdmin.userId})`)
 

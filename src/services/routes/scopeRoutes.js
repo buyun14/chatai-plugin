@@ -4,6 +4,7 @@
 import express from 'express'
 import { ChaiteResponse, getDatabase } from './shared.js'
 import { getScopeManager } from '../scope/ScopeManager.js'
+import { groupSummaryPushService } from '../group/GroupSummaryPushService.js'
 
 const router = express.Router()
 
@@ -162,6 +163,13 @@ router.put('/group/:groupId', async (req, res) => {
                 : {})
         }
         await sm.setGroupSettings(req.params.groupId, dataToSave)
+
+        if (dataToSave.summaryPushEnabled !== undefined) {
+            try {
+                groupSummaryPushService.reload()
+            } catch {}
+        }
+
         res.json(ChaiteResponse.ok({ success: true }))
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))
