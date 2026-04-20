@@ -548,7 +548,8 @@ class Config {
                         intervalValue: 1, // 推送间隔值
                         pushHour: 20, // 每日推送时间（小时，0-23）
                         messageCount: 100, // 总结消息数量
-                        model: '' // 总结使用的模型（留空使用默认）
+                        model: '', // 总结使用的模型（留空使用默认）
+                        modernStyle: true // 定时推送是否使用现代风格渲染（与 #今日群聊 / #群聊总结2 一致）
                     }
                 },
                 userPortrait: {

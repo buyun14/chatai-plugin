@@ -1,5 +1,8 @@
 import config from '../../../config/config.js'
 import { chatLogger } from '../../core/utils/logger.js'
+import { STOP_WORDS } from '../../utils/common.js'
+import { segment } from '../../utils/messageParser.js'
+import { renderService } from '../media/RenderService.js'
 import { ensureScopeManager } from '../scope/ScopeManager.js'
 import { GroupSummaryCore } from './GroupSummaryCore.js'
 
@@ -232,12 +235,176 @@ class GroupSummaryPushService {
         }
 
         const shortModel = actualModel.split('/').pop()
-        const header = `📊 定时群聊总结 (${messages.length}条消息 · ${shortModel})\n\n`
-        const fullText = header + summaryText
+        const globalPush = config.get('features.groupSummary.push') || {}
+        const useModernStyle = globalPush.modernStyle === true
+        const recentMessages = messages.slice(-messageCount)
 
-        await this._sendToGroup(bot, groupId, fullText)
+        let renderOptions
+        try {
+            renderOptions = this._buildSummaryRenderOptions(recentMessages, {
+                dataSource,
+                shortModel,
+                useModernStyle,
+                totalMessageCount: messages.length
+            })
+        } catch (buildErr) {
+            logger.warn(`[GroupSummaryPush] 群 ${groupId} 构建渲染参数失败:`, buildErr.message)
+            renderOptions = {
+                title: useModernStyle ? '今日群聊' : '群聊内容总结',
+                subtitle: `${shortModel} · ${dataSource} · 定时推送`,
+                messageCount: messages.length,
+                participantCount: new Set(recentMessages.map(m => m.nickname || m.userId || '用户')).size,
+                topUsers: [],
+                hourlyActivity: Array(24).fill(0)
+            }
+        }
+
+        try {
+            const imageBuffer = useModernStyle
+                ? await renderService.renderGroupSummaryModern(summaryText, renderOptions)
+                : await renderService.renderGroupSummary(summaryText, renderOptions)
+            await this._sendImageToGroup(bot, groupId, imageBuffer)
+        } catch (renderErr) {
+            logger.warn(`[GroupSummaryPush] 群 ${groupId} 渲染/发送图片失败:`, renderErr.message)
+            const titleEmoji = useModernStyle ? '✨' : '📊'
+            const fullText = `${titleEmoji} 定时${useModernStyle ? '今日群聊' : '群聊总结'} (${messages.length}条消息 · ${shortModel})\n\n${summaryText}`
+            await this._sendToGroup(bot, groupId, fullText)
+        }
+
         this._lastPush.set(groupId, Date.now())
         logger.info(`[GroupSummaryPush] 群 ${groupId} 推送完成 (来源: ${dataSource})`)
+    }
+
+    /**
+     * 构建与 #群聊总结 一致的渲染参数（供 RenderService）
+     * @param {Array} recentMessages
+     * @param {{ dataSource: string, shortModel: string, useModernStyle: boolean, totalMessageCount: number }} meta
+     */
+    _buildSummaryRenderOptions(recentMessages, meta) {
+        const { dataSource, shortModel, useModernStyle, totalMessageCount } = meta
+        const participants = new Set(recentMessages.map(m => m.nickname || m.userId || '用户'))
+
+        const userStats = {}
+        const hourlyActivity = Array(24).fill(0)
+
+        for (const msg of recentMessages) {
+            const name = msg.nickname || msg.userId || '用户'
+            const odId = msg.userId || null
+            if (!userStats[name]) {
+                userStats[name] = { name, odId, count: 0, lastMsg: '' }
+            }
+            userStats[name].count++
+            const plain =
+                typeof msg.content === 'string'
+                    ? msg.content
+                    : Array.isArray(msg.content)
+                      ? msg.content
+                            .filter(c => c.type === 'text')
+                            .map(c => c.text)
+                            .join('')
+                      : String(msg.content || '')
+            if (plain) {
+                userStats[name].lastMsg = plain.substring(0, 30)
+            }
+            if (msg.timestamp) {
+                const hour = new Date(msg.timestamp).getHours()
+                hourlyActivity[hour]++
+            }
+        }
+
+        const topUsers = Object.values(userStats)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, useModernStyle ? 8 : 5)
+            .map(u => ({
+                name: u.name,
+                count: u.count,
+                odId: u.odId,
+                avatar: u.odId ? `https://q1.qlogo.cn/g?b=qq&nk=${u.odId}&s=0` : null
+            }))
+
+        let keywords = []
+        let interactions = []
+        let atmosphere = {}
+        let quotes = []
+
+        if (useModernStyle) {
+            const wordCounts = {}
+            for (const msg of recentMessages) {
+                const content = typeof msg.content === 'string' ? msg.content : ''
+                const words = content.match(/[\u4e00-\u9fa5]{2,4}|[a-zA-Z]{3,}/g) || []
+                for (const word of words) {
+                    if (!STOP_WORDS.has(word) && word.length >= 2) {
+                        wordCounts[word] = (wordCounts[word] || 0) + 1
+                    }
+                }
+            }
+            keywords = Object.entries(wordCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 12)
+                .map(([word, count]) => ({ word, count }))
+
+            const interactionMap = {}
+            for (const msg of recentMessages) {
+                const content = typeof msg.content === 'string' ? msg.content : ''
+                const from = msg.nickname || '用户'
+                const atMatches = content.match(/@([^\s@]+)/g) || []
+                for (const at of atMatches) {
+                    const to = at.replace('@', '')
+                    if (to && to !== from && to !== '全体成员') {
+                        const key = `${from}->${to}`
+                        if (!interactionMap[key]) {
+                            interactionMap[key] = { from, to, count: 0 }
+                        }
+                        interactionMap[key].count++
+                    }
+                }
+            }
+            interactions = Object.values(interactionMap)
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 3)
+
+            const totalMsgs = recentMessages.length
+            const emojiCount = recentMessages.filter(m =>
+                /[\u{1F300}-\u{1F9FF}]|[😀-🙏]/u.test(typeof m.content === 'string' ? m.content : '')
+            ).length
+            atmosphere = {
+                positivity: Math.min(
+                    95,
+                    Math.round(50 + (emojiCount / Math.max(totalMsgs, 1)) * 100 + Math.random() * 20)
+                ),
+                activity: Math.min(95, Math.round(30 + Math.min(totalMsgs / 3, 50) + Math.random() * 15)),
+                interaction: Math.min(
+                    95,
+                    Math.round(
+                        20 + interactions.length * 15 + Object.keys(interactionMap).length * 5 + Math.random() * 10
+                    )
+                )
+            }
+
+            quotes = recentMessages
+                .filter(m => {
+                    const content = typeof m.content === 'string' ? m.content : ''
+                    return (
+                        content.length >= 15 && content.length <= 100 && !content.startsWith('[') && !/^@/.test(content)
+                    )
+                })
+                .sort(() => Math.random() - 0.5)
+                .slice(0, 3)
+                .map(m => ({
+                    content: (typeof m.content === 'string' ? m.content : '').substring(0, 80),
+                    author: m.nickname || '群友'
+                }))
+        }
+
+        return {
+            title: useModernStyle ? '今日群聊' : '群聊内容总结',
+            subtitle: `${shortModel} · ${dataSource} · 定时推送`,
+            messageCount: totalMessageCount ?? recentMessages.length,
+            participantCount: participants.size,
+            topUsers,
+            hourlyActivity,
+            ...(useModernStyle ? { keywords, interactions, atmosphere, quotes } : {})
+        }
     }
 
     /**
@@ -264,6 +431,32 @@ class GroupSummaryPushService {
         } catch (err) {
             logger.error(`[GroupSummaryPush] 发送消息到群 ${groupId} 失败:`, err.message)
         }
+    }
+
+    /**
+     * 发送图片总结到群（与命令行总结一致，优先 pickGroup.sendMsg）
+     */
+    async _sendImageToGroup(bot, groupId, imageBuffer) {
+        const gid = parseInt(groupId, 10)
+        const imgSeg = segment.image(imageBuffer)
+        try {
+            if (typeof bot.pickGroup === 'function') {
+                const group = bot.pickGroup(gid)
+                if (group?.sendMsg) {
+                    return await group.sendMsg(imgSeg)
+                }
+            }
+            if (typeof bot.sendGroupMsg === 'function') {
+                return await bot.sendGroupMsg(gid, imgSeg)
+            }
+            if (typeof bot.sendApi === 'function') {
+                return await bot.sendApi('send_group_msg', { group_id: gid, message: [imgSeg] })
+            }
+        } catch (err) {
+            logger.error(`[GroupSummaryPush] 发送图片到群 ${groupId} 失败:`, err.message)
+            throw err
+        }
+        throw new Error('当前 Bot 不支持发送群图片')
     }
 
     /**
