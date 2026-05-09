@@ -120,11 +120,14 @@ export class Chat extends plugin {
             if (pattern.test(rawMsg)) return false
         }
 
-        // 检查#命令
+        // 检查#命令（排除触发前缀）
         const allowHashCmds = triggerCfg.allowHashCommands === true
         if (!allowHashCmds && /^#\S/.test(rawMsg)) {
             const cleanedForCheck = this.cleanAtBot(rawMsg)
-            if (/^#\S/.test(cleanedForCheck.trim())) return false
+            // 如果是触发前缀消息（如 #chat），不拦截
+            const prefixes = triggerCfg.prefixes || []
+            const isTriggerPrefix = prefixes.some(p => p && cleanedForCheck.startsWith(p))
+            if (!isTriggerPrefix && /^#\S/.test(cleanedForCheck.trim())) return false
         }
 
         // 检查访问权限
