@@ -62,6 +62,8 @@ export class McpManager {
         this.initialized = false
         /** @type {Promise|null} 初始化 Promise（用于防止并发初始化） */
         this.initPromise = null
+        /** @type {Map<string, Promise>} 服务器连接 Promise（用于防止同名服务器并发连接） */
+        this.serverConnectPromises = new Map()
         /** @type {Object} 服务器配置 */
         this.serversConfig = { servers: {} }
     }
@@ -330,22 +332,80 @@ export class McpManager {
      * 1. 扁平格式: { type: 'http', url: '...' }
      * 2. transport嵌套格式: { transport: { type: 'http', url: '...' } }
      */
+    inferServerType(serverConfig) {
+        if (serverConfig.url) return 'sse'
+        if (serverConfig.package) return 'npm'
+        if (serverConfig.command) return 'stdio'
+        return undefined
+    }
+
+    normalizeNpxServerConfig(serverConfig) {
+        if (!serverConfig) return serverConfig
+
+        const command = String(serverConfig.command || '').toLowerCase()
+        const isNpxCommand = command === 'npx' || command === 'npx.cmd'
+        const type = String(serverConfig.type || '').toLowerCase()
+        if (!isNpxCommand || (type && type !== 'stdio')) {
+            return serverConfig
+        }
+
+        const originalArgs = Array.isArray(serverConfig.args) ? serverConfig.args : []
+        const args = [...originalArgs]
+        while (args[0] === '-y' || args[0] === '--yes' || args[0] === '--prefer-offline') {
+            args.shift()
+        }
+
+        const pkg = args.shift()
+        if (!pkg || String(pkg).startsWith('-')) {
+            return serverConfig
+        }
+
+        const { command: _command, ...rest } = serverConfig
+        return {
+            ...rest,
+            type: 'npm',
+            package: pkg,
+            args
+        }
+    }
+
     normalizeServerConfig(serverConfig) {
         if (!serverConfig) return serverConfig
 
         // 如果有 transport 嵌套，提取出来
+        let config = serverConfig
         if (serverConfig.transport && typeof serverConfig.transport === 'object') {
             const { transport, ...rest } = serverConfig
-            return {
+            config = {
                 ...transport,
                 ...rest // 保留其他顶层字段如 env, headers 等
             }
         }
 
-        return serverConfig
+        const normalized = { ...config }
+        normalized.type = (normalized.type || this.inferServerType(normalized) || 'stdio').toLowerCase()
+
+        return this.normalizeNpxServerConfig(normalized)
     }
 
     async connectServer(name, serverConfig) {
+        if (this.serverConnectPromises.has(name)) {
+            await this.serverConnectPromises.get(name)
+        }
+
+        const connectPromise = this._connectServer(name, serverConfig)
+        this.serverConnectPromises.set(name, connectPromise)
+        try {
+            return await connectPromise
+        } finally {
+            if (this.serverConnectPromises.get(name) === connectPromise) {
+                this.serverConnectPromises.delete(name)
+            }
+        }
+    }
+
+    async _connectServer(name, serverConfig) {
+        let client = null
         try {
             // 规范化配置格式
             const normalizedConfig = this.normalizeServerConfig(serverConfig)
@@ -377,7 +437,7 @@ export class McpManager {
                 await this.disconnectServer(name)
             }
 
-            const client = new McpClient(normalizedConfig)
+            client = new McpClient(normalizedConfig)
             await client.connect()
             logger.debug(`[MCP] Client connected for ${name}, fetching tools...`)
 
@@ -438,6 +498,13 @@ export class McpManager {
             logger.debug(`[MCP] Connected to server: ${name}, loaded ${tools.length} tools`)
             return { success: true, tools: tools.length, resources: resources.length, prompts: prompts.length }
         } catch (err) {
+            if (client) {
+                try {
+                    await client.disconnect()
+                } catch (disconnectError) {
+                    logger.warn(`[MCP] Error cleaning failed client for ${name}: ${disconnectError.message}`)
+                }
+            }
             logger.error(`[MCP] Failed to connect to server ${name}: ${err.message}`, err.stack)
             this.servers.set(name, {
                 status: 'error',

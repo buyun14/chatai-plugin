@@ -5,6 +5,44 @@ import express from 'express'
 import { ChaiteResponse } from './shared.js'
 import { mcpManager } from '../../mcp/McpManager.js'
 
+function inferServerType(config) {
+    if (config.url) return 'sse'
+    if (config.package) return 'npm'
+    if (config.command) return 'stdio'
+    return undefined
+}
+
+function normalizeNpxServerConfig(serverConfig) {
+    if (!serverConfig || typeof serverConfig !== 'object') return serverConfig
+
+    const config = { ...serverConfig }
+    config.type = (config.type || inferServerType(config) || 'stdio').toLowerCase()
+
+    const command = String(config.command || '').toLowerCase()
+    const isNpxCommand = command === 'npx' || command === 'npx.cmd'
+    if (!isNpxCommand || (config.type && config.type !== 'stdio')) {
+        return config
+    }
+
+    const args = Array.isArray(config.args) ? [...config.args] : []
+    while (args[0] === '-y' || args[0] === '--yes' || args[0] === '--prefer-offline') {
+        args.shift()
+    }
+
+    const pkg = args.shift()
+    if (!pkg || String(pkg).startsWith('-')) {
+        return config
+    }
+
+    const { command: _command, ...rest } = config
+    return {
+        ...rest,
+        type: 'npm',
+        package: pkg,
+        args
+    }
+}
+
 const router = express.Router()
 
 // GET /servers - 获取所有MCP服务器
@@ -38,8 +76,8 @@ router.post('/servers', async (req, res) => {
         }
 
         // 验证配置
-        const serverConfig = config || {}
-        const type = (serverConfig.type || 'stdio').toLowerCase()
+        const serverConfig = normalizeNpxServerConfig(config || {})
+        const type = serverConfig.type
 
         // 根据类型验证必需字段
         if (type === 'stdio') {
@@ -87,7 +125,7 @@ router.put('/servers/:name', async (req, res) => {
         }
 
         // 使用 McpManager 更新服务器
-        const result = await mcpManager.updateServer(req.params.name, newConfig)
+        const result = await mcpManager.updateServer(req.params.name, normalizeNpxServerConfig(newConfig))
         res.json(ChaiteResponse.ok(result))
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))
@@ -159,18 +197,7 @@ router.post('/import', async (req, res) => {
         for (const [name, serverConfig] of Object.entries(mcpServers)) {
             try {
                 // 转换配置格式（兼容 Claude Desktop 格式）
-                const config = { ...serverConfig }
-
-                // 如果没有 type，根据配置推断
-                if (!config.type) {
-                    if (config.url) {
-                        config.type = 'sse'
-                    } else if (config.package) {
-                        config.type = 'npm'
-                    } else if (config.command) {
-                        config.type = 'stdio'
-                    }
-                }
+                const config = normalizeNpxServerConfig(serverConfig)
 
                 await mcpManager.addServer(name, config)
                 success++
