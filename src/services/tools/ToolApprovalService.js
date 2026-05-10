@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import config from '../../../config/config.js'
-import { logger } from '../../core/utils/logger.js'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 import { toolFilterService } from './ToolFilterService.js'
 
 const RISK_ORDER = { low: 0, medium: 1, high: 2 }
