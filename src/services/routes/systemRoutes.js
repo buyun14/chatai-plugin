@@ -2,9 +2,27 @@
  * 系统路由模块 - 健康检查、指标、系统信息
  */
 import express from 'express'
+import { isIP } from 'node:net'
 import { ChaiteResponse } from './shared.js'
+import { isMaster } from '../../utils/platformAdapter.js'
 
 const router = express.Router()
+
+function isLocalRequest(req) {
+    const remoteAddress = req.socket?.remoteAddress || req.ip || ''
+    const normalized = remoteAddress.replace(/^::ffff:/, '')
+    if (['127.0.0.1', '::1', 'localhost'].includes(normalized)) return true
+    if (isIP(normalized) === 6 && normalized === '::1') return true
+    const forwardedFor = String(req.headers['x-forwarded-for'] || '')
+        .split(',')[0]
+        .trim()
+    return ['127.0.0.1', '::1', 'localhost'].includes(forwardedFor)
+}
+
+function isOwnerRequest(req) {
+    const userId = req.user?.userId || req.user?.user_id || req.user?.id
+    return userId && isMaster(userId)
+}
 
 // GET /health - 健康检查（公开）
 router.get('/health', (req, res) => {
@@ -454,11 +472,19 @@ router.get('/system/monitor', async (req, res) => {
 // DELETE /system/release_port - 释放端口（用于热重载）
 router.delete('/system/release_port', async (req, res) => {
     try {
+        if (!isLocalRequest(req) && !isOwnerRequest(req)) {
+            return res.status(403).json(ChaiteResponse.fail(null, '仅允许本机内部调用或主人释放 Web 服务端口'))
+        }
+
         const { getWebServer } = await import('../webServer.js')
         const webServer = getWebServer()
         if (webServer && webServer.server && !webServer.sharedPort) {
-            webServer.server.close()
-            res.json(ChaiteResponse.ok({ success: true, message: '端口已释放' }))
+            webServer.server.close(error => {
+                if (error) {
+                    return res.status(500).json(ChaiteResponse.fail(null, error.message))
+                }
+                res.json(ChaiteResponse.ok({ success: true, message: '端口已释放' }))
+            })
         } else {
             res.json(ChaiteResponse.ok({ success: false, message: '无需释放或共享端口模式' }))
         }

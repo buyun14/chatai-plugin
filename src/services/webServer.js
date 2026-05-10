@@ -209,11 +209,13 @@ class FingerprintValidator {
         this.bindings = new Map()
     }
     bind(token, fingerprint) {
-        this.bindings.set(token, fingerprint)
+        if (fingerprint) this.bindings.set(token, fingerprint)
     }
     validate(token, fingerprint) {
         const bound = this.bindings.get(token)
-        return !bound || bound === fingerprint
+        if (!bound) return true
+        if (!fingerprint) return false
+        return bound === fingerprint
     }
 }
 
@@ -242,14 +244,14 @@ class AuthHandler {
         if (permanent) {
             let permanentToken = config.get('web.permanentAuthToken')
             if (!permanentToken) {
-                permanentToken = crypto.randomBytes(32).toString('hex')
+                permanentToken = crypto.randomBytes(32).toString('base64url')
                 config.set('web.permanentAuthToken', permanentToken)
                 chatLogger.info('[Auth] 已生成新的永久登录Token')
             }
             return permanentToken
         }
 
-        const token = crypto.randomBytes(32).toString('hex')
+        const token = crypto.randomBytes(32).toString('base64url')
         const expiry = Date.now() + timeout * 1000
         this.tokens.set(token, expiry)
         setTimeout(() => this.tokens.delete(token), timeout * 1000)
@@ -289,6 +291,7 @@ class WebServer {
         this.port = config.get('web.port') || 3000
         this.server = null
         this.mountPath = '/chatai'
+        this.internalToken = crypto.randomBytes(32).toString('base64url')
         this.setupMiddleware()
         this.setupRoutes()
     }
@@ -306,7 +309,7 @@ class WebServer {
             res.header('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS')
             res.header(
                 'Access-Control-Allow-Headers',
-                'Content-Type, Authorization, X-Requested-With, X-Client-Fingerprint, X-Timestamp, X-Nonce, X-Body-Hash, X-Signature'
+                'Content-Type, Authorization, X-Requested-With, X-Client-Fingerprint, X-Timestamp, X-Nonce, X-Body-Hash, X-Signature, X-ChatAI-Internal-Token'
             )
             if (req.method === 'OPTIONS') return res.sendStatus(204)
             next()
@@ -324,11 +327,30 @@ class WebServer {
         const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : cookieToken || queryToken
 
         if (!token) {
+            const internalToken = req.headers['x-chatai-internal-token']
+            if (
+                req.method === 'DELETE' &&
+                (req.path === '/api/system/release_port' || req.path === '/system/release_port') &&
+                internalToken &&
+                internalToken === this.internalToken
+            ) {
+                return next()
+            }
             return res.status(401).json(ChaiteResponse.fail(null, 'No token provided'))
         }
 
         try {
-            jwt.verify(token, authKey, { algorithms: ['HS256'], issuer: 'chatai-panel', audience: 'chatai-client' })
+            const decoded = jwt.verify(token, authKey, {
+                algorithms: ['HS256'],
+                issuer: 'chatai-panel',
+                audience: 'chatai-client'
+            })
+            req.user = decoded
+            const fingerprint = req.headers['x-client-fingerprint']
+            if (!fingerprintValidator.validate(token, fingerprint)) {
+                chatLogger.warn(`[Auth] 客户端指纹不匹配或缺失 - ${req.method} ${req.originalUrl}`)
+                return res.status(401).json(ChaiteResponse.fail(null, 'Invalid client fingerprint'))
+            }
             next()
         } catch (error) {
             chatLogger.warn(`[Auth] JWT验证失败: ${error.name} - ${error.message} - ${req.method} ${req.originalUrl}`)
@@ -365,7 +387,10 @@ class WebServer {
 
                 res.cookie('auth_token', jwtToken, {
                     httpOnly: true,
-                    secure: req.secure,
+                    secure:
+                        req.secure ||
+                        req.headers['x-forwarded-proto'] === 'https' ||
+                        process.env.NODE_ENV === 'production',
                     sameSite: 'lax',
                     maxAge: 30 * 24 * 60 * 60 * 1000,
                     path: mountPath
@@ -404,7 +429,10 @@ class WebServer {
 
                 res.cookie('auth_token', jwtToken, {
                     httpOnly: true,
-                    secure: req.secure,
+                    secure:
+                        req.secure ||
+                        req.headers['x-forwarded-proto'] === 'https' ||
+                        process.env.NODE_ENV === 'production',
                     sameSite: 'lax',
                     maxAge: 30 * 24 * 60 * 60 * 1000,
                     path: mountPath
@@ -501,11 +529,9 @@ class WebServer {
         // GET /api/auth/token/status - 获取Token状态
         this.router.get('/api/auth/token/status', auth, (req, res) => {
             try {
-                const permanentToken = config.get('web.permanentAuthToken')
                 res.json(
                     ChaiteResponse.ok({
-                        hasPermanentToken: !!permanentToken,
-                        token: permanentToken || null
+                        hasPermanentToken: !!config.get('web.permanentAuthToken')
                     })
                 )
             } catch (error) {
@@ -529,7 +555,7 @@ class WebServer {
         this.router.use('/api/graph', auth, graphRoutes)
         this.router.use('/api/images', publicImageRouter) // 公开图片访问，无需认证
         this.router.use('/mcp', mcpServerRoutes) // MCP Server 暴露端点，使用独立 apiKey 鉴权
-        this.router.use('/api/group-admin', groupAdminRoutes)
+        this.router.use('/api/group-admin', auth, groupAdminRoutes)
         this.router.use('/api/skills', auth, skillsRoutes)
         // 游戏编辑路由必须在通用/api路由之前注册，避免被auth中间件拦截
         this.router.use('/api/game-edit', createGameEditRoutes()) // 无需认证，使用UUID访问
@@ -680,14 +706,25 @@ class WebServer {
                             chatLogger.warn(`[WebServer] 端口 ${port} 已被占用，尝试释放端口...`)
                             try {
                                 const fetch = (await import('node-fetch')).default
-                                await Promise.race([
-                                    fetch(`http://localhost:${port}/api/system/release_port`, {
-                                        method: 'DELETE'
-                                    }).catch(() => {}),
-                                    new Promise(r => setTimeout(r, 3000))
+                                const releaseResult = await Promise.race([
+                                    fetch(`http://127.0.0.1:${port}/api/system/release_port`, {
+                                        method: 'DELETE',
+                                        headers: { 'X-ChatAI-Internal-Token': this.internalToken }
+                                    }),
+                                    new Promise(resolveTimeout => setTimeout(() => resolveTimeout(null), 3000))
                                 ])
+                                if (!releaseResult) {
+                                    chatLogger.warn(`[WebServer] 释放端口 ${port} 超时`)
+                                } else if (!releaseResult.ok) {
+                                    const errorText = await releaseResult.text().catch(() => '')
+                                    chatLogger.warn(
+                                        `[WebServer] 释放端口 ${port} 失败: HTTP ${releaseResult.status} ${errorText.slice(0, 200)}`
+                                    )
+                                }
                                 await new Promise(r => setTimeout(r, 1000))
-                            } catch {}
+                            } catch (releaseError) {
+                                chatLogger.warn(`[WebServer] 释放端口 ${port} 请求失败: ${releaseError.message}`)
+                            }
                             resolve(tryListen(port, retries - 1))
                         } else {
                             chatLogger.warn(`[WebServer] 端口 ${port} 已被占用，尝试端口 ${port + 1}...`)

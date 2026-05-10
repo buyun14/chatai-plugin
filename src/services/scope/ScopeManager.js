@@ -880,7 +880,7 @@ export class ScopeManager {
         const { default: config } = await import('../../../config/config.js')
         // 根据场景选择不同的优先级
         const defaultPriority = isPrivate ? ['private', 'user', 'default'] : ['group_user', 'group', 'user', 'default']
-        const priorityOrder = config.get('personality.priority') || defaultPriority
+        const priorityOrder = isPrivate ? defaultPriority : config.get('personality.priority') || defaultPriority
 
         let effectivePrompt = null
         let effectivePresetId = null
@@ -906,7 +906,8 @@ export class ScopeManager {
             imageModel: undefined,
             drawModel: undefined,
             searchModel: undefined,
-            roleplayModel: undefined
+            roleplayModel: undefined,
+            toolApprovalMode: undefined
         }
 
         // 预加载所有可能的配置
@@ -993,7 +994,7 @@ export class ScopeManager {
                 }
 
                 // 功能开关配置（仅从群组配置获取）
-                if (level === 'group' && innerSettings) {
+                if ((level === 'group' || level === 'private') && innerSettings) {
                     if (featureConfig.toolsEnabled === undefined && innerSettings.toolsEnabled !== undefined) {
                         featureConfig.toolsEnabled = innerSettings.toolsEnabled
                     }
@@ -1017,6 +1018,9 @@ export class ScopeManager {
                     }
                     if (featureConfig.triggerMode === undefined && innerSettings.triggerMode) {
                         featureConfig.triggerMode = innerSettings.triggerMode
+                    }
+                    if (featureConfig.toolApprovalMode === undefined && innerSettings.toolApprovalMode) {
+                        featureConfig.toolApprovalMode = innerSettings.toolApprovalMode
                     }
                     // 模型分类配置（chatModel优先，兼容旧的modelId）
                     if (featureConfig.chatModel === undefined) {

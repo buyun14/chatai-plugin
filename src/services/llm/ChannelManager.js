@@ -136,6 +136,8 @@ export class ChannelManager {
         this.channelStats = new Map()
         /** @type {Map<string, Object>} APIKey使用统计 */
         this.keyStats = new Map()
+        /** @type {Map<string, Promise<Array>>} 模型列表请求去重 */
+        this.modelFetchPromises = new Map()
         /** @type {boolean} 是否已初始化 */
         this.initialized = false
         /** @type {NodeJS.Timeout|null} 健康检查定时器 */
@@ -797,42 +799,51 @@ export class ChannelManager {
             throw new Error('Channel not found')
         }
 
-        // 检查缓存
         const cached = await redisClient.get(`models:${id}`)
         if (cached) {
             try {
                 return JSON.parse(cached)
-            } catch (e) {
-                // 忽略解析错误
-            }
+            } catch (e) {}
         }
 
-        let models = []
-
-        try {
-            if (channel.adapterType === 'openai') {
-                models = await this.fetchOpenAIModels(channel)
-            } else if (channel.adapterType === 'gemini') {
-                models = await this.fetchGeminiModels(channel)
-            } else if (channel.adapterType === 'claude') {
-                models = await this.fetchClaudeModels(channel)
-            }
-
-            // 缓存结果（1小时）
-            await redisClient.set(`models:${id}`, JSON.stringify(models), 3600)
-
-            // 更新渠道
-            channel.models = models
-            channel.modelsCached = true
-            channel.status = 'active'
-            this.channels.set(id, channel)
-
-            return models
-        } catch (error) {
-            channel.status = 'error'
-            this.channels.set(id, channel)
-            throw error
+        if (this.modelFetchPromises.has(id)) {
+            return await this.modelFetchPromises.get(id)
         }
+
+        const fetchPromise = (async () => {
+            let models
+            try {
+                if (channel.adapterType === 'openai') {
+                    models = await this.fetchOpenAIModels(channel)
+                } else if (channel.adapterType === 'gemini') {
+                    models = await this.fetchGeminiModels(channel)
+                } else if (channel.adapterType === 'claude') {
+                    models = await this.fetchClaudeModels(channel)
+                } else {
+                    throw new Error(`未知适配器类型: ${channel.adapterType || '未配置'}`)
+                }
+
+                await redisClient.set(`models:${id}`, JSON.stringify(models), 3600)
+
+                channel.models = models
+                channel.modelsCached = true
+                channel.status = 'active'
+                this.channels.set(id, channel)
+
+                return models
+            } catch (error) {
+                channel.status = 'error'
+                channel.lastError = error.message
+                channel.lastErrorTime = Date.now()
+                this.channels.set(id, channel)
+                throw error
+            } finally {
+                this.modelFetchPromises.delete(id)
+            }
+        })()
+
+        this.modelFetchPromises.set(id, fetchPromise)
+        return await fetchPromise
     }
 
     /**

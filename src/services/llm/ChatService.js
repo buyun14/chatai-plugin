@@ -410,7 +410,10 @@ export class ChatService {
                 logger.info(`[ChatService] 群组禁用了工具调用`)
             }
         }
-        const toolsAllowed = !disableTools && presetEnableTools && scopeToolsEnabled
+        const globalToolApprovalMode = config.get('builtinTools.approvalMode') || 'auto'
+        const presetToolApprovalMode = currentPreset?.tools?.toolApprovalMode || currentPreset?.toolApprovalMode
+        const toolApprovalMode = scopeFeatures.toolApprovalMode || presetToolApprovalMode || globalToolApprovalMode
+        const toolsAllowed = !disableTools && presetEnableTools && scopeToolsEnabled && toolApprovalMode !== 'ask'
         const hasImages = images.length > 0
         let allTools = []
 
@@ -419,6 +422,8 @@ export class ChatService {
             await mcpManager.init()
             allTools = mcpManager.getTools({ applyConfig: true })
             logger.debug(`[ChatService] 加载工具: ${allTools.length}个`)
+        } else if (toolApprovalMode === 'ask') {
+            logger.debug('[ChatService] ask 模式：不向模型暴露工具')
         }
 
         // 统一使用对话模型，同时处理上下文和工具调用
@@ -519,7 +524,11 @@ export class ChatService {
             adapterType: adapterType,
             event,
             presetId: effectivePresetId,
-            userPermission: event?.sender?.role || 'member'
+            userPermission: event?.sender?.role || 'member',
+            groupId,
+            userId: event?.user_id || userId,
+            conversationId,
+            toolApprovalMode
         }
 
         // 输出模型选择摘要
@@ -912,7 +921,13 @@ export class ChatService {
             disableHistoryRead: skipHistory,
             enableReasoning: effectiveEnableReasoning,
             reasoningEffort: channelThinking.defaultLevel || 'low',
-            thinkingVendorControl: channelThinking.vendorThinkingControl ?? 'auto'
+            thinkingVendorControl: channelThinking.vendorThinkingControl ?? 'auto',
+            event,
+            presetId: effectivePresetId,
+            userPermission: event?.sender?.role || 'member',
+            groupId,
+            userId: event?.user_id || userId,
+            toolApprovalMode
         }
         const tempSource =
             overrideTemperature !== undefined

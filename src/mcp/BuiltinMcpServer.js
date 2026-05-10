@@ -958,7 +958,24 @@ export class BuiltinMcpServer {
                 config.get('builtinTools.dangerousTools'),
                 config.get('bots.default.builtinTools.dangerousTools'),
                 config.get('tools.builtin.dangerousTools'),
-                ['kick_member', 'mute_member', 'recall_message']
+                [
+                    'kick_member',
+                    'mute_member',
+                    'recall_message',
+                    'mute_all',
+                    'set_group_admin',
+                    'set_group_card',
+                    'set_group_title',
+                    'set_group_name',
+                    'send_group_notice',
+                    'delete_group_notice',
+                    'write_file',
+                    'delete_file',
+                    'move_file',
+                    'copy_file',
+                    'create_directory',
+                    'execute_command'
+                ]
             ) || []
         const disabledTools =
             firstDefined(

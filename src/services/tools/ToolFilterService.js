@@ -31,11 +31,23 @@ class ToolFilterService {
         // 危险工具列表（需要特殊权限）
         this.defaultDangerousTools = [
             'kick_member',
+            'mute_member',
             'recall_message',
-            'set_group_whole_ban',
-            'delete_group_file',
+            'mute_all',
+            'set_group_admin',
+            'set_group_card',
+            'set_group_title',
+            'set_group_name',
+            'send_group_notice',
+            'delete_group_notice',
+            'write_file',
+            'delete_file',
+            'move_file',
+            'copy_file',
+            'create_directory',
             'execute_command',
-            'send_group_notice'
+            'set_group_whole_ban',
+            'delete_group_file'
         ]
         // 敏感工具列表（可能泄露信息）
         this.sensitiveTools = [

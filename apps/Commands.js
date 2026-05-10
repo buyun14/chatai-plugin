@@ -94,6 +94,10 @@ export class AICommands extends plugin {
             priority: -100, // 最高优先级，确保命令不被其他插件抢占（数值越小优先级越高）
             rule: [
                 {
+                    reg: '^#工具模式(?:\\s+(ask|询问|auto|自动|confirm_all|全确认|yolo|直接执行))?$',
+                    fnc: 'toolApprovalMode'
+                },
+                {
                     reg: '^#(结束对话|结束会话|新对话|新会话)$',
                     fnc: 'endConversation'
                 },
@@ -160,6 +164,76 @@ export class AICommands extends plugin {
      */
     isMasterUser(userId) {
         return isMaster(userId)
+    }
+
+    normalizeToolApprovalMode(input) {
+        const value = String(input || '')
+            .trim()
+            .toLowerCase()
+        const map = {
+            ask: 'ask',
+            询问: 'ask',
+            auto: 'auto',
+            自动: 'auto',
+            confirm_all: 'confirm_all',
+            全确认: 'confirm_all',
+            yolo: 'yolo',
+            直接执行: 'yolo'
+        }
+        return map[value] || null
+    }
+
+    getToolApprovalModeLabel(mode) {
+        const labels = {
+            ask: 'ask（询问，不暴露工具）',
+            auto: 'auto（低风险自动，中高风险确认）',
+            confirm_all: 'confirm_all（全部确认）',
+            yolo: 'yolo（跳过确认，保留硬拦截）'
+        }
+        return labels[mode] || mode
+    }
+
+    async toolApprovalMode() {
+        const e = this.e
+        const match = String(e.msg || '')
+            .trim()
+            .match(/^#工具模式(?:\s+(\S+))?$/)
+        const requestedMode = this.normalizeToolApprovalMode(match?.[1])
+        const sm = await ensureScopeManager()
+        const userId = String(e.user_id)
+        const groupId = e.group_id ? String(e.group_id) : null
+        const effective = await sm.getEffectiveSettings(groupId, userId, { isPrivate: !groupId })
+        const currentMode = effective?.features?.toolApprovalMode || config.get('builtinTools.approvalMode') || 'auto'
+
+        if (!requestedMode) {
+            await this.reply(
+                `当前工具模式：${this.getToolApprovalModeLabel(currentMode)}\n来源：${effective?.features?.toolApprovalMode ? effective.source : '全局配置'}\n可用：#工具模式 ask/auto/confirm_all/yolo`,
+                true
+            )
+            return true
+        }
+
+        const isMaster = this.isMasterUser(e.user_id)
+        const isGroupAdmin = e.sender?.role === 'admin' || e.sender?.role === 'owner'
+        if (requestedMode === 'yolo' && !isMaster) {
+            await this.reply('yolo 模式仅允许 Bot 主人设置', true)
+            return true
+        }
+        if (groupId && !isMaster && !isGroupAdmin) {
+            await this.reply('群聊工具模式需要群主/管理员或 Bot 主人修改', true)
+            return true
+        }
+
+        const ok = groupId
+            ? await sm.setGroupSettings(groupId, { toolApprovalMode: requestedMode })
+            : await sm.setPrivateSettings(userId, { toolApprovalMode: requestedMode })
+        await this.reply(
+            ok
+                ? `工具模式已切换为：${this.getToolApprovalModeLabel(requestedMode)}`
+                : '工具模式切换失败，请查看后台日志',
+            true
+        )
+        return true
     }
 
     /**

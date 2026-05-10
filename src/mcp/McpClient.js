@@ -609,7 +609,7 @@ export class McpClient {
     getSSEMessageUrlCandidates() {
         let messageUrl
         if (this.sseMessageEndpoint) {
-            messageUrl = this.sseMessageEndpoint.startsWith('http')
+            messageUrl = /^https?:\/\//i.test(this.sseMessageEndpoint)
                 ? this.sseMessageEndpoint
                 : `${this.sseBaseUrl}${this.sseMessageEndpoint}`
         } else {
@@ -683,12 +683,11 @@ export class McpClient {
         const messageUrls = this.getSSEMessageUrlCandidates()
         const messageUrl = messageUrls[0]
 
-        // 对 ping 方法不输出 debug 日志（心跳每30秒调用一次，避免日志过多）
         if (request.method !== 'ping') {
             logger.debug(`[MCP] SSE POST to: ${messageUrl}, id: ${request.id}, method: ${request.method}`)
         }
 
-        // 先注册 pending request，再发送 POST（避免时序问题：SSE 响应可能在 POST 返回前到达）
+        let cleanupPending = () => {}
         const responsePromise = new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 if (this.pendingRequests.has(request.id)) {
@@ -697,14 +696,22 @@ export class McpClient {
                 }
             }, timeout)
 
+            cleanupPending = err => {
+                clearTimeout(timer)
+                this.pendingRequests.delete(request.id)
+                if (err) reject(err)
+            }
+
             this.pendingRequests.set(request.id, {
                 method: request.method,
                 resolve: result => {
                     clearTimeout(timer)
+                    this.pendingRequests.delete(request.id)
                     resolve(result)
                 },
                 reject: err => {
                     clearTimeout(timer)
+                    this.pendingRequests.delete(request.id)
                     reject(err)
                 }
             })
@@ -733,7 +740,6 @@ export class McpClient {
                 continue
             }
 
-            responseText = await response.text().catch(() => '')
             if (response.ok) {
                 if (index > 0) {
                     this.sseMessageEndpoint = url
@@ -741,6 +747,7 @@ export class McpClient {
                 break
             }
 
+            responseText = (await response.text().catch(() => '')).slice(0, 2000)
             lastError = new Error(`SSE request failed: ${response.status} ${response.statusText} ${responseText}`)
             if (response.status !== 404 || index === messageUrls.length - 1) {
                 break
@@ -748,33 +755,38 @@ export class McpClient {
         }
 
         if (!response?.ok) {
-            this.pendingRequests.delete(request.id)
-            throw lastError || new Error('SSE request failed')
+            const error = lastError || new Error('SSE request failed')
+            cleanupPending(error)
+            throw error
         }
 
-        // 检查响应
         if (request.method !== 'ping') {
-            logger.debug(`[MCP] SSE POST response status: ${response.status}, body: ${responseText.substring(0, 100)}`)
+            logger.debug(`[MCP] SSE POST response status: ${response.status}`)
         }
 
-        // 如果是 202 Accepted 或 "Accepted"，等待 SSE 流响应
-        if (response.status === 202 || responseText === 'Accepted' || responseText.trim() === '') {
+        if (response.status === 202 || response.status === 204) {
             if (request.method !== 'ping') {
                 logger.debug(`[MCP] Waiting for SSE stream response for id: ${request.id}`)
             }
             return await responsePromise
         }
 
-        // 尝试解析 JSON 响应（某些服务器可能直接返回结果）
+        responseText = await response.text().catch(() => '')
+        if (responseText.trim() === '' || responseText === 'Accepted') {
+            if (request.method !== 'ping') {
+                logger.debug(`[MCP] Waiting for SSE stream response for id: ${request.id}`)
+            }
+            return await responsePromise
+        }
+
         try {
-            this.pendingRequests.delete(request.id)
             const jsonResponse = JSON.parse(responseText)
+            cleanupPending()
             if (jsonResponse.error) {
                 throw new Error(jsonResponse.error.message || JSON.stringify(jsonResponse.error))
             }
             return jsonResponse.result !== undefined ? jsonResponse.result : jsonResponse
         } catch (e) {
-            // 如果不是 JSON，等待 SSE 响应
             logger.debug(`[MCP] Response not JSON, waiting for SSE stream...`)
             return await responsePromise
         }

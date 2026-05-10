@@ -9,6 +9,7 @@ import {
 import DefaultHistoryManager from '../utils/history.js'
 import { asyncLocalStorage, extractClassName, getKey } from '../utils/index.js'
 import { logService } from '../../services/stats/LogService.js'
+import { toolApprovalService } from '../../services/tools/ToolApprovalService.js'
 
 /**
  * 生成工具调用ID
@@ -1820,8 +1821,18 @@ export class AbstractClient {
      * @returns {Promise<{toolCallResults: Array, toolCallLogs: Array}>}
      */
     async executeToolCalls(toolCalls, options) {
-        const toolCallResults = []
-        const toolCallLogs = []
+        const preflight = await toolApprovalService.preflight(toolCalls, {
+            ...options,
+            availableTools: this.tools
+        })
+        const toolCallResults = [...preflight.blockedResults.map(item => item.toolResult)]
+        const toolCallLogs = [...preflight.blockedResults.map(item => item.log)]
+        const approvedToolCalls = preflight.approvedToolCalls || []
+
+        if (approvedToolCalls.length === 0) {
+            return { toolCallResults, toolCallLogs }
+        }
+
         const sequentialTools = [
             'send_group_message',
             'send_private_message',
@@ -1835,7 +1846,7 @@ export class AbstractClient {
         const sequentialCalls = []
         const parallelCalls = []
 
-        for (const tc of toolCalls) {
+        for (const tc of approvedToolCalls) {
             const name = tc.function?.name || tc.name || ''
             if (sequentialTools.includes(name)) {
                 sequentialCalls.push(tc)
@@ -1894,7 +1905,7 @@ export class AbstractClient {
 
         const totalDuration = Date.now() - startTime
         this.logger.debug(
-            `[Tool] 执行完成: ${totalDuration}ms (并行:${parallelCalls.length} 串行:${sequentialCalls.length})`
+            `[Tool] 执行完成: ${totalDuration}ms (并行:${parallelCalls.length} 串行:${sequentialCalls.length} 拦截:${preflight.blockedResults.length})`
         )
 
         return { toolCallResults, toolCallLogs }

@@ -23,6 +23,8 @@ import { checkAccessList, sendForwardMsg as platformSendForwardMsg } from '../sr
 import { mcpManager } from '../src/mcp/McpManager.js'
 import { setToolContext } from '../src/core/utils/toolAdapter.js'
 import { conversationTracker } from '../src/services/llm/ConversationTracker.js'
+import { contextManager } from '../src/services/llm/ContextManager.js'
+import { toolApprovalService } from '../src/services/tools/ToolApprovalService.js'
 
 export {
     recordSentMessage,
@@ -86,6 +88,17 @@ export class Chat extends plugin {
 
         if (isSelfMessage(e)) return false
         if (isMessageProcessed(e)) return false
+
+        const approvalInput = toolApprovalService.resolveApproval(e.msg || '', {
+            event: e,
+            conversationId: contextManager.getConversationId(String(e.user_id), e.group_id ? String(e.group_id) : null),
+            groupId: e.group_id,
+            userId: e.user_id
+        })
+        if (approvalInput.handled) {
+            if (approvalInput.message) await this.reply(approvalInput.message, true)
+            return false
+        }
 
         // 缓存群消息
         if (e.isGroup && e.message_id) {

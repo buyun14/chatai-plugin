@@ -33,7 +33,7 @@ export class LlmService {
      * @returns {Promise<OpenAIClient>} 配置好的客户端
      */
     static async createClient(options = {}) {
-        const enableTools = options.enableTools !== false
+        const enableTools = options.enableTools !== false && options.toolApprovalMode !== 'ask'
 
         // 使用传入的选项，不再读取全局thinking配置
         let enableReasoning = options.enableReasoning || false
@@ -150,7 +150,9 @@ export class LlmService {
                     toolsConfig,
                     event: options.event,
                     presetId: options.presetId,
-                    userPermission: options.event?.sender?.role || 'member'
+                    userPermission: options.userPermission || options.event?.sender?.role || 'member',
+                    groupId: options.groupId,
+                    userId: options.userId
                 })
             }
         }

@@ -270,9 +270,34 @@ class Config {
                 // 禁用的工具列表
                 disabledTools: [],
                 // 危险工具需要确认
-                dangerousTools: ['kick_member', 'mute_member', 'recall_message'],
+                dangerousTools: [
+                    'kick_member',
+                    'mute_member',
+                    'recall_message',
+                    'mute_all',
+                    'set_group_admin',
+                    'set_group_card',
+                    'set_group_title',
+                    'set_group_name',
+                    'send_group_notice',
+                    'delete_group_notice',
+                    'write_file',
+                    'delete_file',
+                    'move_file',
+                    'copy_file',
+                    'create_directory',
+                    'execute_command'
+                ],
                 // 是否允许危险操作
-                allowDangerous: false
+                allowDangerous: false,
+                approvalMode: 'auto',
+                approvalTimeoutMs: 60000,
+                approvalLowRiskTools: [],
+                approvalMediumRiskTools: [],
+                approvalHighRiskTools: [],
+                approvalBypassTools: [],
+                approvalAllowSessionBypass: true,
+                approvalSessionBypassMaxRisk: 'medium'
             },
             /*
              * 渠道列表，每个渠道的配置结构：

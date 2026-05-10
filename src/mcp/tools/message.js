@@ -22,6 +22,7 @@ import {
     buildBigImageCard
 } from './helpers.js'
 import { recordSentMessage, checkDuplicateToolSend, markToolSendCommitted } from '../../utils/messageDedup.js'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 import {
     ForwardMessageParser,
     IcqqMessageUtils,
@@ -312,30 +313,32 @@ export const messageTools = [
                                 const group = bot.pickGroup?.(gid)
                                 if (!group) continue
 
-                                // 检查用户是否在该群
                                 let memberExists = false
-                                if (group.pickMember) {
-                                    const member = group.pickMember(userId)
-                                    // 检查成员是否有效
-                                    if (member?.info || member?.sendMsg) {
-                                        memberExists = true
-                                    }
-                                }
-                                if (!memberExists && group.getMemberMap) {
+                                if (group.getMemberMap) {
                                     try {
                                         const memberMap = await group.getMemberMap()
-                                        memberExists = memberMap?.has?.(userId)
-                                    } catch {}
+                                        memberExists = memberMap?.has?.(userId) || memberMap?.has?.(String(userId))
+                                    } catch (memberMapErr) {
+                                        logger.debug(`[MCP Tool] 获取群 ${gid} 成员列表失败: ${memberMapErr.message}`)
+                                    }
+                                }
+                                if (!memberExists && group.pickMember) {
+                                    const member = group.pickMember(userId)
+                                    if (member?.info) {
+                                        memberExists = true
+                                    }
                                 }
 
                                 if (memberExists) {
                                     groupId = gid
                                     break
                                 }
-                            } catch {}
+                            } catch (memberSearchErr) {
+                                logger.debug(`[MCP Tool] 检查群 ${gid} 成员失败: ${memberSearchErr.message}`)
+                            }
                         }
                     } catch (searchErr) {
-                        // 搜索失败，继续尝试直接发送
+                        logger.debug(`[MCP Tool] 搜索共同群失败: ${searchErr.message}`)
                     }
                 }
 
@@ -352,6 +355,18 @@ export const messageTools = [
                 const group = bot.pickGroup?.(groupId)
                 if (!group) {
                     return { success: false, error: '无法获取群对象' }
+                }
+
+                if (group.getMemberMap) {
+                    try {
+                        const memberMap = await group.getMemberMap()
+                        const exists = memberMap?.has?.(userId) || memberMap?.has?.(String(userId))
+                        if (!exists) {
+                            return { success: false, error: '目标用户不在该群内，无法发送临时消息' }
+                        }
+                    } catch (memberMapErr) {
+                        logger.debug(`[MCP Tool] 发送临时消息前获取成员列表失败: ${memberMapErr.message}`)
+                    }
                 }
 
                 const member = group.pickMember?.(userId)

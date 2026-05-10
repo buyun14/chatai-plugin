@@ -51,7 +51,15 @@ router.get('/builtin/config', async (req, res) => {
                 allowedTools: builtinConfig.allowedTools || [],
                 disabledTools: builtinConfig.disabledTools || [],
                 allowDangerous: builtinConfig.allowDangerous || false,
-                dangerousTools: builtinConfig.dangerousTools || []
+                dangerousTools: builtinConfig.dangerousTools || [],
+                approvalMode: builtinConfig.approvalMode || 'auto',
+                approvalTimeoutMs: builtinConfig.approvalTimeoutMs || 60000,
+                approvalLowRiskTools: builtinConfig.approvalLowRiskTools || [],
+                approvalMediumRiskTools: builtinConfig.approvalMediumRiskTools || [],
+                approvalHighRiskTools: builtinConfig.approvalHighRiskTools || [],
+                approvalBypassTools: builtinConfig.approvalBypassTools || [],
+                approvalAllowSessionBypass: builtinConfig.approvalAllowSessionBypass !== false,
+                approvalSessionBypassMaxRisk: builtinConfig.approvalSessionBypassMaxRisk || 'medium'
             })
         )
     } catch (error) {
@@ -62,7 +70,22 @@ router.get('/builtin/config', async (req, res) => {
 // PUT /builtin/config - 更新内置工具配置
 router.put('/builtin/config', async (req, res) => {
     try {
-        const { enabled, enabledCategories, allowedTools, disabledTools, allowDangerous, dangerousTools } = req.body
+        const {
+            enabled,
+            enabledCategories,
+            allowedTools,
+            disabledTools,
+            allowDangerous,
+            dangerousTools,
+            approvalMode,
+            approvalTimeoutMs,
+            approvalLowRiskTools,
+            approvalMediumRiskTools,
+            approvalHighRiskTools,
+            approvalBypassTools,
+            approvalAllowSessionBypass,
+            approvalSessionBypassMaxRisk
+        } = req.body
         const currentConfig = config.get('builtinTools') || {}
 
         const newConfig = {
@@ -72,7 +95,25 @@ router.put('/builtin/config', async (req, res) => {
             allowedTools: allowedTools !== undefined ? allowedTools : currentConfig.allowedTools,
             disabledTools: disabledTools !== undefined ? disabledTools : currentConfig.disabledTools,
             allowDangerous: allowDangerous !== undefined ? allowDangerous : currentConfig.allowDangerous,
-            dangerousTools: dangerousTools !== undefined ? dangerousTools : currentConfig.dangerousTools
+            dangerousTools: dangerousTools !== undefined ? dangerousTools : currentConfig.dangerousTools,
+            approvalMode: approvalMode !== undefined ? approvalMode : currentConfig.approvalMode,
+            approvalTimeoutMs: approvalTimeoutMs !== undefined ? approvalTimeoutMs : currentConfig.approvalTimeoutMs,
+            approvalLowRiskTools:
+                approvalLowRiskTools !== undefined ? approvalLowRiskTools : currentConfig.approvalLowRiskTools,
+            approvalMediumRiskTools:
+                approvalMediumRiskTools !== undefined ? approvalMediumRiskTools : currentConfig.approvalMediumRiskTools,
+            approvalHighRiskTools:
+                approvalHighRiskTools !== undefined ? approvalHighRiskTools : currentConfig.approvalHighRiskTools,
+            approvalBypassTools:
+                approvalBypassTools !== undefined ? approvalBypassTools : currentConfig.approvalBypassTools,
+            approvalAllowSessionBypass:
+                approvalAllowSessionBypass !== undefined
+                    ? approvalAllowSessionBypass
+                    : currentConfig.approvalAllowSessionBypass,
+            approvalSessionBypassMaxRisk:
+                approvalSessionBypassMaxRisk !== undefined
+                    ? approvalSessionBypassMaxRisk
+                    : currentConfig.approvalSessionBypassMaxRisk
         }
 
         config.set('builtinTools', newConfig)

@@ -17,16 +17,14 @@ class FrontendAuthHandler {
         if (permanent) {
             let permanentToken = config.get('web.permanentAuthToken')
             if (!permanentToken || forceNew) {
-                permanentToken = crypto.randomUUID()
+                permanentToken = crypto.randomBytes(32).toString('base64url')
                 config.set('web.permanentAuthToken', permanentToken)
                 chatLogger.info('[Auth] 已生成新的永久登录Token')
             }
             return permanentToken
         }
 
-        const timestamp = Math.floor(Date.now() / 1000)
-        const randomString = Math.random().toString(36).substring(2, 15)
-        const token = `${timestamp}-${randomString}`
+        const token = crypto.randomBytes(32).toString('base64url')
         const expiry = Date.now() + timeout * 1000
 
         this.tokens.set(token, expiry)
@@ -87,7 +85,7 @@ class ClientFingerprintValidator {
     validate(jwtToken, fingerprint) {
         const storedFingerprint = this.tokenFingerprints.get(jwtToken)
         if (!storedFingerprint) return true
-        if (!fingerprint) return true
+        if (!fingerprint) return false
         return storedFingerprint === fingerprint
     }
 
@@ -128,11 +126,15 @@ export function createAuthMiddleware() {
         }
 
         try {
-            const decoded = jwt.verify(token, getAuthKey())
+            const decoded = jwt.verify(token, getAuthKey(), {
+                algorithms: ['HS256'],
+                issuer: 'chatai-panel',
+                audience: 'chatai-client'
+            })
 
             const fingerprint = req.headers['x-client-fingerprint']
             if (!fingerprintValidator.validate(token, fingerprint)) {
-                chatLogger.warn('[Auth] 客户端指纹不匹配')
+                chatLogger.warn('[Auth] 客户端指纹不匹配或缺失')
                 return res.status(401).json(ApiResponse.fail(null, 'Invalid client fingerprint'))
             }
 
@@ -156,7 +158,11 @@ export function setupAuthRoutes(app) {
 
         if (existingToken) {
             try {
-                jwt.verify(existingToken, getAuthKey())
+                jwt.verify(existingToken, getAuthKey(), {
+                    algorithms: ['HS256'],
+                    issuer: 'chatai-panel',
+                    audience: 'chatai-client'
+                })
                 return res.redirect('/')
             } catch {}
         }
@@ -186,7 +192,11 @@ export function setupAuthRoutes(app) {
 
                 res.cookie('auth_token', jwtToken, {
                     maxAge: 30 * 24 * 60 * 60 * 1000,
-                    httpOnly: false,
+                    httpOnly: true,
+                    secure:
+                        req.secure ||
+                        req.headers['x-forwarded-proto'] === 'https' ||
+                        process.env.NODE_ENV === 'production',
                     sameSite: 'lax',
                     path: '/'
                 })
@@ -274,7 +284,11 @@ export function setupAuthRoutes(app) {
         }
 
         try {
-            const decoded = jwt.verify(token, getAuthKey())
+            const decoded = jwt.verify(token, getAuthKey(), {
+                algorithms: ['HS256'],
+                issuer: 'chatai-panel',
+                audience: 'chatai-client'
+            })
             res.json(
                 ApiResponse.ok({
                     authenticated: true,
