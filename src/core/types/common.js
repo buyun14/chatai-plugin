@@ -45,6 +45,13 @@ export class BaseClientOptions {
             if (options.requestBodyTemplate) this.requestBodyTemplate = options.requestBodyTemplate
             if (options.chatPath) this.chatPath = options.chatPath
             if (options.modelsPath) this.modelsPath = options.modelsPath
+            if (options.responsePath) this.responsePath = options.responsePath
+            if (options.endpoints) this.endpoints = options.endpoints
+            if (options.apiInterface) this.apiInterface = options.apiInterface
+            if (options.openaiApiInterface) this.openaiApiInterface = options.openaiApiInterface
+            if (options.experimental) this.experimental = options.experimental
+            if (options.openaiWs) this.openaiWs = options.openaiWs
+            if (options.imageConfig) this.imageConfig = options.imageConfig
             if (options.channelName) this.channelName = options.channelName
             if (options.userAgent) this.userAgent = options.userAgent
             if (options.xff) this.xff = options.xff

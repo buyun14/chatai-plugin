@@ -547,6 +547,17 @@ export class ChatService {
             if (channel.modelsPath) {
                 clientOptions.modelsPath = channel.modelsPath
             }
+            clientOptions.apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
+            clientOptions.openaiApiInterface = clientOptions.apiInterface
+            if (channel.responsePath) {
+                clientOptions.responsePath = channel.responsePath
+            }
+            if (channel.endpoints) {
+                clientOptions.endpoints = channel.endpoints
+            }
+            if (channel.experimental) {
+                clientOptions.experimental = channel.experimental
+            }
             // 传递渠道的自定义请求头
             if (channel.customHeaders && Object.keys(channel.customHeaders).length > 0) {
                 clientOptions.customHeaders = channel.customHeaders
@@ -1074,7 +1085,15 @@ export class ChatService {
                             baseUrl: currentChannel.baseUrl,
                             apiKey: keyInfo.key,
                             keyIndex: keyInfo.keyIndex,
-                            imageConfig: currentChannel.imageConfig || clientOptions.imageConfig
+                            imageConfig: currentChannel.imageConfig || clientOptions.imageConfig,
+                            chatPath: currentChannel.chatPath || '',
+                            modelsPath: currentChannel.modelsPath || '',
+                            responsePath: currentChannel.responsePath || currentChannel.endpoints?.responses || '',
+                            endpoints: currentChannel.endpoints || {},
+                            apiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
+                            openaiApiInterface:
+                                currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
+                            experimental: currentChannel.experimental || {}
                         }
                         currentClient = await LlmService.createClient(fallbackClientOptions)
 
@@ -1211,7 +1230,16 @@ export class ChatService {
                                         baseUrl: altChannel.baseUrl,
                                         apiKey: altKeyInfo.key,
                                         keyIndex: altKeyInfo.keyIndex,
-                                        imageConfig: altChannel.imageConfig || clientOptions.imageConfig
+                                        imageConfig: altChannel.imageConfig || clientOptions.imageConfig,
+                                        chatPath: altChannel.chatPath || '',
+                                        modelsPath: altChannel.modelsPath || '',
+                                        responsePath: altChannel.responsePath || altChannel.endpoints?.responses || '',
+                                        endpoints: altChannel.endpoints || {},
+                                        apiInterface:
+                                            altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
+                                        openaiApiInterface:
+                                            altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
+                                        experimental: altChannel.experimental || {}
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     emptyRetryCount = 0
@@ -1339,7 +1367,16 @@ export class ChatService {
                                         baseUrl: altChannel.baseUrl,
                                         apiKey: altKeyInfo.key,
                                         keyIndex: altKeyInfo.keyIndex,
-                                        imageConfig: altChannel.imageConfig || clientOptions.imageConfig
+                                        imageConfig: altChannel.imageConfig || clientOptions.imageConfig,
+                                        chatPath: altChannel.chatPath || '',
+                                        modelsPath: altChannel.modelsPath || '',
+                                        responsePath: altChannel.responsePath || altChannel.endpoints?.responses || '',
+                                        endpoints: altChannel.endpoints || {},
+                                        apiInterface:
+                                            altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
+                                        openaiApiInterface:
+                                            altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
+                                        experimental: altChannel.experimental || {}
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     errorSwitched = true

@@ -1,6 +1,7 @@
 import { chatLogger } from '../../utils/logger.js'
 const logger = chatLogger
 import OpenAI from 'openai'
+import WebSocket from 'ws'
 import crypto from 'node:crypto'
 import {
     AbstractClient,
@@ -209,6 +210,476 @@ export class OpenAIClient extends AbstractClient {
      * @param {SendMessageOption} options
      * @returns {Promise<HistoryMessage & { usage: ModelUsage }>}
      */
+    getOpenAIInterfaceMode(options = {}) {
+        return (
+            options.apiInterface ||
+            this.options?.apiInterface ||
+            this.options?.openaiApiInterface ||
+            'chat'
+        ).toLowerCase()
+    }
+
+    getOpenAIResponsePath() {
+        return this.endpoints?.responses || this.responsePath || '/responses'
+    }
+
+    shouldUseOpenAIResponses(options = {}) {
+        return (
+            this.getOpenAIInterfaceMode(options) === 'responses' || this.getOpenAIInterfaceMode(options) === 'response'
+        )
+    }
+
+    shouldUseExperimentalOpenAIWs(options = {}) {
+        const wsConfig = this.options?.experimental?.ws || this.options?.openaiWs || {}
+        return this.shouldUseOpenAIResponses(options) && (options.experimentalWs === true || wsConfig.enabled === true)
+    }
+
+    buildOpenAIClientOptions(apiKey, mergedHeaders, channelProxy, responsePath) {
+        const clientOptions = {
+            apiKey,
+            defaultHeaders: mergedHeaders
+        }
+        if (this.baseUrl) {
+            clientOptions.baseURL = this.baseUrl
+        }
+        if (channelProxy) {
+            clientOptions.httpAgent = channelProxy
+            logger.debug('[OpenAI适配器] 使用代理:', proxyService.getProfileForScope('channel')?.name)
+        }
+
+        const originalBaseUrl = (this.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
+        const buildEndpointUrl = endpointPath =>
+            originalBaseUrl + (endpointPath.startsWith('/') ? endpointPath : '/' + endpointPath)
+        const customChatPath = this.endpoints?.chat || this.chatPath
+        const customModelsPath = this.endpoints?.models || this.modelsPath
+        const customResponsePath = responsePath || this.endpoints?.responses || this.responsePath
+        if (
+            customChatPath ||
+            customModelsPath ||
+            this.endpoints?.embeddings ||
+            this.endpoints?.images ||
+            customResponsePath
+        ) {
+            clientOptions.fetch = async (url, init) => {
+                let newUrl = url.toString()
+                if (customChatPath && newUrl.includes('/chat/completions')) {
+                    newUrl = buildEndpointUrl(customChatPath)
+                    logger.debug(`[OpenAI适配器] 使用自定义对话端点: ${newUrl}`)
+                }
+                if (customResponsePath && newUrl.includes('/responses')) {
+                    newUrl = buildEndpointUrl(customResponsePath)
+                    logger.debug(`[OpenAI适配器] 使用Responses端点: ${newUrl}`)
+                }
+                if (customModelsPath && newUrl.includes('/models')) {
+                    newUrl = buildEndpointUrl(customModelsPath)
+                    logger.debug(`[OpenAI适配器] 使用自定义模型列表端点: ${newUrl}`)
+                }
+                if (this.endpoints?.embeddings && newUrl.includes('/embeddings')) {
+                    newUrl = buildEndpointUrl(this.endpoints.embeddings)
+                    logger.debug(`[OpenAI适配器] 使用自定义嵌入端点: ${newUrl}`)
+                }
+                if (this.endpoints?.images && newUrl.includes('/images/generations')) {
+                    newUrl = buildEndpointUrl(this.endpoints.images)
+                    logger.debug(`[OpenAI适配器] 使用自定义图像生成端点: ${newUrl}`)
+                }
+                return fetch(newUrl, init)
+            }
+        }
+
+        return clientOptions
+    }
+
+    openAIMessageContentToResponseInputContent(content) {
+        if (typeof content === 'string') {
+            return [{ type: 'input_text', text: content }]
+        }
+        if (!Array.isArray(content)) {
+            return [{ type: 'input_text', text: content ? String(content) : '' }]
+        }
+        return content
+            .map(item => {
+                if (!item || typeof item !== 'object') return null
+                if (item.type === 'text') return { type: 'input_text', text: item.text || '' }
+                if (item.type === 'image_url')
+                    return { type: 'input_image', image_url: item.image_url?.url || item.url || '' }
+                if (item.type === 'input_audio') return { type: 'input_audio', input_audio: item.input_audio }
+                return item
+            })
+            .filter(Boolean)
+    }
+
+    openAIMessagesToResponsesInput(messages) {
+        return messages.flatMap(message => {
+            if (message.role === 'tool') {
+                return [
+                    {
+                        type: 'function_call_output',
+                        call_id: message.tool_call_id,
+                        output:
+                            typeof message.content === 'string'
+                                ? message.content
+                                : JSON.stringify(message.content ?? '')
+                    }
+                ]
+            }
+
+            const items = []
+            const hasContent =
+                typeof message.content === 'string'
+                    ? message.content.length > 0
+                    : Array.isArray(message.content) && message.content.length > 0
+            if (hasContent || !message.tool_calls?.length) {
+                items.push({
+                    type: 'message',
+                    role: message.role === 'developer' ? 'system' : message.role,
+                    content: this.openAIMessageContentToResponseInputContent(message.content)
+                })
+            }
+
+            for (const toolCall of message.tool_calls || []) {
+                items.push({
+                    type: 'function_call',
+                    call_id: toolCall.id,
+                    name: toolCall.function?.name || '',
+                    arguments: toolCall.function?.arguments || '{}'
+                })
+            }
+
+            return items
+        })
+    }
+
+    openAIToolsToResponsesTools(tools) {
+        return tools.map(tool => {
+            if (tool?.type === 'function' && tool.function) {
+                return {
+                    type: 'function',
+                    name: tool.function.name,
+                    description: tool.function.description || '',
+                    parameters: tool.function.parameters || { type: 'object', properties: {} }
+                }
+            }
+            return tool
+        })
+    }
+
+    buildResponsesPayload(requestPayload, options = {}) {
+        const payload = {
+            model: requestPayload.model,
+            input: this.openAIMessagesToResponsesInput(requestPayload.messages || []),
+            temperature: requestPayload.temperature,
+            stream: requestPayload.stream,
+            tools: requestPayload.tools?.length ? this.openAIToolsToResponsesTools(requestPayload.tools) : undefined,
+            tool_choice: requestPayload.tool_choice,
+            reasoning: requestPayload.reasoning_effort ? { effort: requestPayload.reasoning_effort } : undefined,
+            previous_response_id: options.previous_response_id || options.previousResponseId,
+            store: options.storeResponse === true || options.store === true ? true : undefined
+        }
+
+        if (requestPayload.max_completion_tokens || requestPayload.max_tokens) {
+            payload.max_output_tokens = requestPayload.max_completion_tokens || requestPayload.max_tokens
+        }
+        Object.keys(payload).forEach(key => {
+            if (payload[key] === undefined || payload[key] === null) delete payload[key]
+        })
+        return payload
+    }
+
+    normalizeResponsesToolCall(item) {
+        const args = item.arguments ?? item.action?.arguments ?? item.input ?? '{}'
+        return {
+            id: item.call_id || item.id || crypto.randomUUID(),
+            type: 'function',
+            function: {
+                name: item.name || item.action?.name || item.function?.name || '',
+                arguments: typeof args === 'string' ? args : JSON.stringify(args || {})
+            }
+        }
+    }
+
+    responsesOutputToChatCompletion(response) {
+        let content = ''
+        let reasoningContent = ''
+        const toolCalls = []
+
+        for (const item of response.output || []) {
+            if (item.type === 'message') {
+                for (const part of item.content || []) {
+                    if (part.type === 'output_text' || part.type === 'text') content += part.text || ''
+                    if (part.type === 'reasoning_text' || part.type === 'summary_text')
+                        reasoningContent += part.text || ''
+                }
+            } else if (item.type === 'function_call') {
+                toolCalls.push(this.normalizeResponsesToolCall(item))
+            } else if (item.type === 'reasoning') {
+                for (const part of item.summary || item.content || []) {
+                    if (part.text) reasoningContent += part.text
+                }
+            }
+        }
+
+        if (!content && response.output_text) {
+            content = response.output_text
+        }
+
+        const finishReasonMap = {
+            completed: 'stop',
+            failed: 'error',
+            incomplete: 'length'
+        }
+
+        return {
+            id: response.id,
+            choices: [
+                {
+                    message: {
+                        role: 'assistant',
+                        content: content || null,
+                        reasoning_content: reasoningContent || null,
+                        tool_calls: toolCalls.length ? toolCalls : undefined
+                    },
+                    finish_reason: finishReasonMap[response.status] || response.status
+                }
+            ],
+            usage: {
+                prompt_tokens: response.usage?.input_tokens,
+                completion_tokens: response.usage?.output_tokens,
+                total_tokens: response.usage?.total_tokens,
+                completion_tokens_details: {
+                    reasoning_tokens: response.usage?.output_tokens_details?.reasoning_tokens
+                },
+                prompt_tokens_details: {
+                    cached_tokens: response.usage?.input_tokens_details?.cached_tokens
+                }
+            }
+        }
+    }
+
+    async collectResponsesStream(stream) {
+        let content = ''
+        let reasoningContent = ''
+        const toolCallsMap = new Map()
+        let usage = null
+        let status = null
+        let responseId = null
+
+        for await (const event of stream) {
+            if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
+                content += event.delta || ''
+            } else if (event.type === 'response.reasoning_text.delta') {
+                reasoningContent += event.delta || ''
+            } else if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
+                const toolCall = this.normalizeResponsesToolCall(event.item)
+                toolCallsMap.set(toolCall.id, toolCall)
+            } else if (event.type === 'response.completed' || event.type === 'response.done') {
+                usage = event.response?.usage || usage
+                status = event.response?.status || 'completed'
+                responseId = event.response?.id || responseId
+                const converted = this.responsesOutputToChatCompletion(event.response || {})
+                const msg = converted.choices?.[0]?.message || {}
+                content = content || msg.content || ''
+                reasoningContent = reasoningContent || msg.reasoning_content || ''
+                for (const tc of msg.tool_calls || []) toolCallsMap.set(tc.id, tc)
+            } else if (event.type === 'response.failed') {
+                throw new Error(event.response?.error?.message || event.error?.message || 'OpenAI Responses API failed')
+            } else if (event.type === 'response.incomplete') {
+                usage = event.response?.usage || usage
+                status = event.response?.status || 'incomplete'
+                responseId = event.response?.id || responseId
+                const converted = this.responsesOutputToChatCompletion(event.response || {})
+                const msg = converted.choices?.[0]?.message || {}
+                content = content || msg.content || ''
+                reasoningContent = reasoningContent || msg.reasoning_content || ''
+            } else if (event.type === 'error') {
+                throw new Error(event.error?.message || event.message || 'OpenAI Responses API stream error')
+            }
+        }
+
+        return {
+            id: responseId,
+            choices: [
+                {
+                    message: {
+                        role: 'assistant',
+                        content: content || null,
+                        reasoning_content: reasoningContent || null,
+                        tool_calls: toolCallsMap.size ? Array.from(toolCallsMap.values()) : undefined
+                    },
+                    finish_reason: status === 'completed' ? 'stop' : status === 'incomplete' ? 'length' : status
+                }
+            ],
+            usage: usage
+                ? {
+                      prompt_tokens: usage.input_tokens,
+                      completion_tokens: usage.output_tokens,
+                      total_tokens: usage.total_tokens,
+                      completion_tokens_details: {
+                          reasoning_tokens: usage.output_tokens_details?.reasoning_tokens
+                      },
+                      prompt_tokens_details: {
+                          cached_tokens: usage.input_tokens_details?.cached_tokens
+                      }
+                  }
+                : {}
+        }
+    }
+
+    buildRealtimeWsUrl() {
+        const base = this.options?.experimental?.ws?.baseUrl || this.baseUrl || 'https://api.openai.com/v1'
+        const url = new URL(base)
+        url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:'
+        const basePath = url.pathname.replace(/\/+$/, '').replace(/\/responses$/, '')
+        const responsePath = this.getOpenAIResponsePath()
+        url.pathname = basePath + (responsePath.startsWith('/') ? responsePath : '/' + responsePath)
+        return url.toString()
+    }
+
+    responseInputContentToRealtimeContent(content) {
+        if (typeof content === 'string') return [{ type: 'input_text', text: content }]
+        if (!Array.isArray(content)) return [{ type: 'input_text', text: String(content || '') }]
+        return content
+            .map(item => {
+                if (!item || typeof item !== 'object') return null
+                if (item.type === 'input_text') return item
+                if (item.type === 'text') return { type: 'input_text', text: item.text || '' }
+                return null
+            })
+            .filter(Boolean)
+    }
+
+    responsesInputToRealtimeText(input) {
+        const parts = []
+        for (const item of input || []) {
+            if (item.role === 'user' || item.role === 'system' || item.role === 'assistant') {
+                for (const part of this.responseInputContentToRealtimeContent(item.content)) {
+                    if (part.text) parts.push(`${item.role}: ${part.text}`)
+                }
+            } else if (item.type === 'function_call_output') {
+                parts.push(`tool: ${item.output || ''}`)
+            }
+        }
+        return parts.join('\n')
+    }
+
+    async createResponsesViaWebSocket(apiKey, responsesPayload) {
+        if (responsesPayload.tools?.length) {
+            logger.warn('[OpenAI适配器] Responses WebSocket 暂不处理工具调用，已回退到 HTTP Responses API')
+            return null
+        }
+
+        const wsUrl = this.options?.experimental?.ws?.url || this.buildRealtimeWsUrl()
+        const wsHeaders = {
+            Authorization: `Bearer ${apiKey}`,
+            Accept: 'application/json'
+        }
+
+        return await new Promise((resolve, reject) => {
+            const ws = new WebSocket(wsUrl, { headers: wsHeaders })
+            let text = ''
+            let usage = null
+            let responseId = null
+            let status = null
+            let completedResponse = null
+            let settled = false
+            const timeout = setTimeout(() => {
+                if (!settled) {
+                    settled = true
+                    ws.close()
+                    reject(new Error('OpenAI Responses websocket timeout'))
+                }
+            }, this.options?.experimental?.ws?.timeout || 60000)
+
+            const finish = result => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                ws.close()
+                resolve(result)
+            }
+
+            const fail = error => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                ws.close()
+                reject(error)
+            }
+
+            ws.on('open', () => {
+                const message = { type: 'response.create', ...responsesPayload }
+                delete message.stream
+                ws.send(JSON.stringify(message))
+            })
+
+            ws.on('message', data => {
+                let event
+                try {
+                    event = JSON.parse(data.toString())
+                } catch {
+                    return
+                }
+
+                if (event.type === 'response.created' || event.type === 'response.in_progress') {
+                    responseId = event.response?.id || event.response_id || responseId
+                    status = event.response?.status || status
+                } else if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
+                    text += event.delta || ''
+                } else if (event.type === 'response.output_text.done' || event.type === 'response.content_part.done') {
+                    if (event.text && !text) text = event.text
+                    if (event.part?.type === 'output_text' && event.part?.text && !text) text = event.part.text
+                } else if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
+                    completedResponse = completedResponse || { output: [] }
+                    completedResponse.output.push(event.item)
+                } else if (event.type === 'response.completed' || event.type === 'response.done') {
+                    usage = event.response?.usage || usage
+                    responseId = event.response?.id || event.response_id || responseId
+                    status = event.response?.status || 'completed'
+                    completedResponse = event.response || completedResponse
+                    finish({
+                        id: responseId,
+                        output_text: text || event.response?.output_text || '',
+                        output: completedResponse?.output || [
+                            {
+                                type: 'message',
+                                content: [{ type: 'output_text', text }]
+                            }
+                        ],
+                        status,
+                        usage
+                    })
+                } else if (event.type === 'response.incomplete') {
+                    usage = event.response?.usage || usage
+                    responseId = event.response?.id || event.response_id || responseId
+                    completedResponse = event.response || completedResponse
+                    finish({
+                        id: responseId,
+                        output_text: text || event.response?.output_text || '',
+                        output: completedResponse?.output || [
+                            {
+                                type: 'message',
+                                content: [{ type: 'output_text', text }]
+                            }
+                        ],
+                        status: 'incomplete',
+                        usage
+                    })
+                } else if (event.type === 'response.failed') {
+                    fail(
+                        new Error(
+                            event.response?.error?.message ||
+                                event.error?.message ||
+                                'OpenAI Responses websocket failed'
+                        )
+                    )
+                } else if (event.type === 'error') {
+                    fail(new Error(event.error?.message || event.message || 'OpenAI Responses websocket error'))
+                }
+            })
+
+            ws.on('error', fail)
+        })
+    }
+
     async _sendMessage(histories, apiKey, options) {
         // 获取渠道代理配置
         const channelProxy = proxyService.getChannelProxyAgent(this.baseUrl)
@@ -262,53 +733,7 @@ export class OpenAIClient extends AbstractClient {
             )
         }
 
-        const clientOptions = {
-            apiKey,
-            baseURL: this.baseUrl,
-            defaultHeaders: mergedHeaders
-        }
-        if (channelProxy) {
-            clientOptions.httpAgent = channelProxy
-            logger.debug('[OpenAI适配器] 使用代理:', proxyService.getProfileForScope('channel')?.name)
-        }
-        // 支持自定义端点配置（优先使用endpoints.chat，其次使用chatPath兼容旧格式）
-        const customChatPath = this.endpoints?.chat || this.chatPath
-        if (customChatPath) {
-            const originalBaseUrl = this.baseUrl?.replace(/\/+$/, '') || ''
-            clientOptions.fetch = async (url, init) => {
-                let newUrl = url.toString()
-                // 替换聊天端点
-                if (newUrl.includes('/chat/completions')) {
-                    newUrl = originalBaseUrl + (customChatPath.startsWith('/') ? customChatPath : '/' + customChatPath)
-                    logger.debug(`[OpenAI适配器] 使用自定义对话端点: ${newUrl}`)
-                }
-                // 替换模型列表端点
-                const customModelsPath = this.endpoints?.models || this.modelsPath
-                if (customModelsPath && newUrl.includes('/models')) {
-                    newUrl =
-                        originalBaseUrl + (customModelsPath.startsWith('/') ? customModelsPath : '/' + customModelsPath)
-                    logger.debug(`[OpenAI适配器] 使用自定义模型列表端点: ${newUrl}`)
-                }
-                // 替换嵌入端点
-                if (this.endpoints?.embeddings && newUrl.includes('/embeddings')) {
-                    newUrl =
-                        originalBaseUrl +
-                        (this.endpoints.embeddings.startsWith('/')
-                            ? this.endpoints.embeddings
-                            : '/' + this.endpoints.embeddings)
-                    logger.debug(`[OpenAI适配器] 使用自定义嵌入端点: ${newUrl}`)
-                }
-                // 替换图像生成端点
-                if (this.endpoints?.images && newUrl.includes('/images/generations')) {
-                    newUrl =
-                        originalBaseUrl +
-                        (this.endpoints.images.startsWith('/') ? this.endpoints.images : '/' + this.endpoints.images)
-                    logger.debug(`[OpenAI适配器] 使用自定义图像生成端点: ${newUrl}`)
-                }
-                return fetch(newUrl, init)
-            }
-        }
-
+        const clientOptions = this.buildOpenAIClientOptions(apiKey, mergedHeaders, channelProxy)
         const client = new OpenAI(clientOptions)
 
         const messages = []
@@ -438,11 +863,18 @@ export class OpenAIClient extends AbstractClient {
 
         applyVendorThinkingPayload(requestPayload, enableReasoning, this.baseUrl, thinkingVendorControl)
 
+        const useResponsesApi = this.shouldUseOpenAIResponses(options)
+        if (useResponsesApi) {
+            requestPayload.stream = this.shouldUseExperimentalOpenAIWs(options) ? false : useStream
+            delete requestPayload.stream_options
+        }
+
         logger.debug(
             '[OpenAI适配器] 请求:',
             JSON.stringify({
                 model: requestPayload.model,
                 stream: requestPayload.stream,
+                interface: useResponsesApi ? 'responses' : 'chat',
                 messages: requestPayload.messages?.length,
                 tools: requestPayload.tools?.length || 0
             })
@@ -457,10 +889,28 @@ export class OpenAIClient extends AbstractClient {
 
         let chatCompletion
         try {
-            const response = await client.chat.completions.create(requestPayload)
+            let response
+            if (useResponsesApi) {
+                const responsesPayload = this.buildResponsesPayload(requestPayload, options)
+                if (this.shouldUseExperimentalOpenAIWs(options)) {
+                    try {
+                        response = await this.createResponsesViaWebSocket(apiKey, responsesPayload)
+                    } catch (wsError) {
+                        logger.warn(
+                            `[OpenAI适配器] Responses WebSocket 调用失败，回退到 HTTP Responses API: ${wsError.message}`
+                        )
+                    }
+                }
+                response = response || (await client.responses.create(responsesPayload))
+                chatCompletion = responsesPayload.stream
+                    ? await this.collectResponsesStream(response)
+                    : this.responsesOutputToChatCompletion(response)
+            } else {
+                response = await client.chat.completions.create(requestPayload)
+            }
 
             // 如果是流式响应，需要收集所有 chunk
-            if (useStream) {
+            if (!useResponsesApi && useStream) {
                 logger.debug(`[OpenAI适配器] 流式响应处理开始`)
                 let allContent = ''
                 let allReasoningContent = ''
@@ -582,7 +1032,7 @@ export class OpenAIClient extends AbstractClient {
                 logger.debug(
                     `[OpenAI适配器] Stream响应: finish=${finishReason}, tools=${toolCalls.length}, content=${finalContent.length}字符`
                 )
-            } else {
+            } else if (!useResponsesApi) {
                 chatCompletion = response
 
                 // 简化响应日志
@@ -1179,14 +1629,16 @@ export class OpenAIClient extends AbstractClient {
      */
     async listModels() {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
-        const client = new OpenAI({
+        const channelProxy = proxyService.getChannelProxyAgent(this.baseUrl)
+        const clientOptions = this.buildOpenAIClientOptions(
             apiKey,
-            baseURL: this.baseUrl,
-            defaultHeaders: {
+            {
                 'User-Agent':
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        })
+            },
+            channelProxy
+        )
+        const client = new OpenAI(clientOptions)
 
         try {
             const modelsList = await client.models.list()

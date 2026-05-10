@@ -415,6 +415,10 @@ export class ChannelManager {
                 customHeaders: channelConfig.customHeaders || {},
                 headersTemplate: channelConfig.headersTemplate || '',
                 requestBodyTemplate: channelConfig.requestBodyTemplate || '',
+                apiInterface: channelConfig.apiInterface || channelConfig.openaiApiInterface || 'chat',
+                openaiApiInterface: channelConfig.apiInterface || channelConfig.openaiApiInterface || 'chat',
+                responsePath: channelConfig.responsePath || channelConfig.endpoints?.responses || '',
+                experimental: channelConfig.experimental || {},
                 // 自定义路径配置
                 chatPath: channelConfig.chatPath || '',
                 modelsPath: channelConfig.modelsPath || '',
@@ -587,6 +591,10 @@ export class ChannelManager {
             customHeaders: channelData.customHeaders || {},
             headersTemplate: channelData.headersTemplate || '',
             requestBodyTemplate: channelData.requestBodyTemplate || '',
+            apiInterface: channelData.apiInterface || channelData.openaiApiInterface || 'chat',
+            openaiApiInterface: channelData.apiInterface || channelData.openaiApiInterface || 'chat',
+            responsePath: channelData.responsePath || channelData.endpoints?.responses || '',
+            experimental: channelData.experimental || {},
             chatPath: channelData.chatPath || '',
             modelsPath: channelData.modelsPath || '',
             overrides: {
@@ -607,6 +615,7 @@ export class ChannelManager {
                 models: channelData.endpoints?.models || '', // 模型列表端点
                 embeddings: channelData.endpoints?.embeddings || '', // 嵌入端点
                 images: channelData.endpoints?.images || '', // 图像生成端点
+                responses: channelData.endpoints?.responses || channelData.responsePath || '', // Responses API 端点
                 ...(channelData.endpoints || {})
             },
             // 认证方式覆盖
@@ -682,6 +691,10 @@ export class ChannelManager {
             'customHeaders',
             'headersTemplate',
             'requestBodyTemplate',
+            'apiInterface',
+            'openaiApiInterface',
+            'responsePath',
+            'experimental',
             'timeout',
             'retry',
             'quota',
@@ -717,6 +730,21 @@ export class ChannelManager {
                 } else {
                     channel[field] = updates[field]
                 }
+            }
+        }
+
+        channel.apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
+        channel.openaiApiInterface = channel.apiInterface
+        channel.endpoints = {
+            ...(channel.endpoints || {}),
+            responses: channel.responsePath || channel.endpoints?.responses || ''
+        }
+        channel.responsePath = channel.responsePath || channel.endpoints.responses || ''
+        channel.experimental = channel.experimental || {}
+        if (channel.apiInterface !== 'responses' && channel.experimental.ws?.enabled) {
+            channel.experimental = {
+                ...channel.experimental,
+                ws: { ...channel.experimental.ws, enabled: false }
             }
         }
 
@@ -1105,6 +1133,10 @@ export class ChannelManager {
                     chatPath: channel.chatPath, // 自定义对话路径（兼容旧格式）
                     modelsPath: channel.modelsPath, // 自定义模型列表路径（兼容旧格式）
                     endpoints: channel.endpoints || {}, // 自定义端点配置
+                    responsePath: channel.responsePath || channel.endpoints?.responses || '',
+                    apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+                    openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+                    experimental: channel.experimental || {},
                     imageConfig: channel.imageConfig || {},
                     features: ['chat'],
                     tools: []
@@ -2088,6 +2120,10 @@ export class ChannelManager {
                 // 请求头/请求体JSON模板
                 headersTemplate: ch.headersTemplate,
                 requestBodyTemplate: ch.requestBodyTemplate,
+                apiInterface: ch.apiInterface,
+                openaiApiInterface: ch.openaiApiInterface,
+                responsePath: ch.responsePath,
+                experimental: ch.experimental,
                 overrides: ch.overrides,
                 imageConfig: ch.imageConfig,
                 // 自定义路径配置

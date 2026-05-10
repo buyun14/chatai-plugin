@@ -43,7 +43,16 @@ export class LlmService {
         // 从渠道管理器加载配置
         await channelManager.init()
 
-        let apiKey, baseUrl, ClientClass, adapterType, chatPath, modelsPath, endpoints
+        let apiKey,
+            baseUrl,
+            ClientClass,
+            adapterType,
+            chatPath,
+            modelsPath,
+            responsePath,
+            endpoints,
+            apiInterface,
+            experimental
 
         // 优先使用传入的选项
         if (options.apiKey && options.baseUrl) {
@@ -52,6 +61,10 @@ export class LlmService {
             adapterType = options.adapterType || 'openai'
             chatPath = options.chatPath || ''
             modelsPath = options.modelsPath || ''
+            responsePath = options.responsePath || ''
+            endpoints = options.endpoints || {}
+            apiInterface = options.apiInterface || options.openaiApiInterface || 'chat'
+            experimental = options.experimental || {}
         } else {
             const model = options.model || config.get('llm.defaultModel')
             const channel =
@@ -70,6 +83,9 @@ export class LlmService {
             chatPath = channel.chatPath || '' // 兼容旧格式
             modelsPath = channel.modelsPath || '' // 兼容旧格式
             endpoints = channel.endpoints || {} // 自定义端点配置
+            responsePath = channel.responsePath || endpoints.responses || ''
+            apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
+            experimental = channel.experimental || {}
             // 自动选择渠道时，从渠道获取 imageConfig（调用方未显式传入的场景）
             if (!options.imageConfig && channel.imageConfig) {
                 options.imageConfig = channel.imageConfig
@@ -145,12 +161,30 @@ export class LlmService {
             baseUrl,
             chatPath, // 自定义对话路径（兼容旧格式）
             modelsPath, // 自定义模型列表路径（兼容旧格式）
-            endpoints: endpoints || {}, // 自定义端点配置 { chat, models, embeddings, images }
+            responsePath, // Responses API 路径（兼容自定义 /responses）
+            endpoints: endpoints || {}, // 自定义端点配置 { chat, models, responses, embeddings, images }
+            apiInterface,
+            openaiApiInterface: apiInterface,
+            experimental,
             features: ['chat'],
             tools,
             enableReasoning,
             reasoningEffort,
             thinkingVendorControl
+        }
+
+        if (options.apiInterface || options.openaiApiInterface) {
+            clientConfig.apiInterface = options.apiInterface || options.openaiApiInterface
+            clientConfig.openaiApiInterface = clientConfig.apiInterface
+        }
+        if (options.responsePath) {
+            clientConfig.responsePath = options.responsePath
+        }
+        if (options.endpoints) {
+            clientConfig.endpoints = { ...clientConfig.endpoints, ...options.endpoints }
+        }
+        if (options.experimental) {
+            clientConfig.experimental = options.experimental
         }
 
         // 传递图片处理配置

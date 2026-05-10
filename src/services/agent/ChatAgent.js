@@ -1062,6 +1062,17 @@ export class ChatAgent {
             if (channel.modelsPath) {
                 clientOptions.modelsPath = channel.modelsPath
             }
+            clientOptions.apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
+            clientOptions.openaiApiInterface = clientOptions.apiInterface
+            if (channel.responsePath) {
+                clientOptions.responsePath = channel.responsePath
+            }
+            if (channel.endpoints) {
+                clientOptions.endpoints = channel.endpoints
+            }
+            if (channel.experimental) {
+                clientOptions.experimental = channel.experimental
+            }
             if (channel.customHeaders) {
                 clientOptions.customHeaders = channel.customHeaders
             }
@@ -1114,7 +1125,14 @@ export class ChatAgent {
                         adapterType: newChannel.adapterType,
                         baseUrl: newChannel.baseUrl,
                         apiKey: keyInfo.key,
-                        imageConfig: newChannel.imageConfig || clientOptions.imageConfig
+                        imageConfig: newChannel.imageConfig || clientOptions.imageConfig,
+                        chatPath: newChannel.chatPath || '',
+                        modelsPath: newChannel.modelsPath || '',
+                        responsePath: newChannel.responsePath || newChannel.endpoints?.responses || '',
+                        endpoints: newChannel.endpoints || {},
+                        apiInterface: newChannel.apiInterface || newChannel.openaiApiInterface || 'chat',
+                        openaiApiInterface: newChannel.apiInterface || newChannel.openaiApiInterface || 'chat',
+                        experimental: newChannel.experimental || {}
                     }
                     currentClient = await LlmService.createClient(newClientOptions)
                 }

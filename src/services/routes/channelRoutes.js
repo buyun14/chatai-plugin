@@ -88,7 +88,22 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/channels/test - Test single channel
 router.post('/test', async (req, res) => {
-    let { id, adapterType, baseUrl, apiKey, apiKeys, models, advanced, strategy, chatPath } = req.body
+    let {
+        id,
+        adapterType,
+        baseUrl,
+        apiKey,
+        apiKeys,
+        models,
+        advanced,
+        strategy,
+        chatPath,
+        responsePath,
+        endpoints,
+        apiInterface,
+        openaiApiInterface,
+        experimental
+    } = req.body
     const startTime = Date.now()
 
     let usedKeyIndex = -1
@@ -103,6 +118,11 @@ router.post('/test', async (req, res) => {
             adapterType = channel.adapterType
             baseUrl = channel.baseUrl
             chatPath = channel.chatPath // 获取渠道的自定义对话路径
+            responsePath = channel.responsePath || channel.endpoints?.responses || ''
+            endpoints = channel.endpoints || {}
+            apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
+            openaiApiInterface = apiInterface
+            experimental = channel.experimental || {}
             models = channel.models
             advanced = channel.advanced || advanced
 
@@ -153,6 +173,11 @@ router.post('/test', async (req, res) => {
                 apiKey: apiKey || config.get('openai.apiKey'),
                 baseUrl: baseUrl || config.get('openai.baseUrl'),
                 chatPath: chatPath, // 自定义对话路径
+                responsePath,
+                endpoints: endpoints || {},
+                apiInterface: apiInterface || openaiApiInterface || 'chat',
+                openaiApiInterface: apiInterface || openaiApiInterface || 'chat',
+                experimental: experimental || {},
                 customHeaders, // 自定义请求头
                 headersTemplate, // 请求头模板
                 requestBodyTemplate, // 请求体模板
@@ -339,17 +364,20 @@ router.put('/:id/select-baseurl', async (req, res) => {
 
 // POST /api/channels/fetch-models
 router.post('/fetch-models', async (req, res) => {
-    let { adapterType, baseUrl, apiKey, modelsPath } = req.body
+    let { adapterType = 'openai', baseUrl, apiKey, modelsPath } = req.body
 
-    if (baseUrl) {
-        baseUrl = normalizeBaseUrl(baseUrl, adapterType)
+    if (!baseUrl || !String(baseUrl).trim()) {
+        return res.status(400).json(ApiResponse.fail(null, '请提供 Base URL，避免误用默认官方地址'))
     }
+    baseUrl = normalizeBaseUrl(baseUrl, adapterType)
 
     try {
         if (adapterType === 'openai') {
+            chatLogger.debug(`[获取模型] 使用BaseURL: ${baseUrl}`)
             // 如果有自定义 modelsPath，使用自定义路径获取模型
             if (modelsPath) {
-                const finalUrl = (baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '') + modelsPath
+                const finalUrl =
+                    baseUrl.replace(/\/+$/, '') + (modelsPath.startsWith('/') ? modelsPath : '/' + modelsPath)
                 chatLogger.debug(`[获取模型] 使用自定义路径: ${finalUrl}`)
 
                 const response = await fetch(finalUrl, {
@@ -385,7 +413,7 @@ router.post('/fetch-models', async (req, res) => {
             const OpenAI = (await import('openai')).default
             const openai = new OpenAI({
                 apiKey: apiKey || config.get('openai.apiKey'),
-                baseURL: baseUrl || config.get('openai.baseUrl'),
+                baseURL: baseUrl,
                 defaultHeaders: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
@@ -397,7 +425,7 @@ router.post('/fetch-models', async (req, res) => {
                 return res.status(500).json(ApiResponse.fail(null, 'API返回格式不正确'))
             }
 
-            const isOfficialOpenAI = !baseUrl || baseUrl.includes('api.openai.com')
+            const isOfficialOpenAI = baseUrl.includes('api.openai.com')
             let models = modelsList.data.map(m => m.id)
 
             if (isOfficialOpenAI) {
@@ -450,6 +478,11 @@ router.post('/batch-test', async (req, res) => {
                 apiKey,
                 baseUrl: channel.baseUrl,
                 chatPath: channel.chatPath,
+                responsePath: channel.responsePath || channel.endpoints?.responses || '',
+                endpoints: channel.endpoints || {},
+                apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+                openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+                experimental: channel.experimental || {},
                 customHeaders: channel.customHeaders || {},
                 headersTemplate: channel.headersTemplate || '',
                 requestBodyTemplate: channel.requestBodyTemplate || '',
@@ -541,6 +574,11 @@ router.post('/test-model', async (req, res) => {
             apiKey,
             baseUrl: channel.baseUrl,
             chatPath: channel.chatPath, // 自定义对话路径
+            responsePath: channel.responsePath || channel.endpoints?.responses || '',
+            endpoints: channel.endpoints || {},
+            apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            experimental: channel.experimental || {},
             customHeaders: channel.customHeaders || {},
             headersTemplate: channel.headersTemplate || '',
             requestBodyTemplate: channel.requestBodyTemplate || '',
