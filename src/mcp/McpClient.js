@@ -527,7 +527,7 @@ export class McpClient {
 
     async ping() {
         try {
-            await this.request('ping', {}, 5000)
+            await this.request('ping', undefined, 5000)
             return true
         } catch (error) {
             // Ping not supported, ignore
@@ -716,6 +716,8 @@ export class McpClient {
                 }
             })
         })
+
+        responsePromise.catch(() => {})
 
         let response
         let responseText = ''
@@ -1022,10 +1024,28 @@ export class McpClient {
      * @param {Object} args - 工具参数
      * @returns {Promise<Object>} 工具执行结果
      */
+    normalizeToolArgs(args) {
+        if (args && typeof args === 'object' && !Array.isArray(args)) {
+            return args
+        }
+        if (args === undefined || args === null || args === '') {
+            return {}
+        }
+        if (typeof args === 'string') {
+            try {
+                const parsed = JSON.parse(args)
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    return parsed
+                }
+            } catch (error) {}
+        }
+        return { value: args }
+    }
+
     async callTool(name, args) {
         const result = await this.request('tools/call', {
             name,
-            arguments: args
+            arguments: this.normalizeToolArgs(args)
         })
         return result
     }

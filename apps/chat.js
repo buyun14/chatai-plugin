@@ -25,6 +25,7 @@ import { setToolContext } from '../src/core/utils/toolAdapter.js'
 import { conversationTracker } from '../src/services/llm/ConversationTracker.js'
 import { contextManager } from '../src/services/llm/ContextManager.js'
 import { toolApprovalService } from '../src/services/tools/ToolApprovalService.js'
+import { presetManager } from '../src/services/preset/PresetManager.js'
 
 export {
     recordSentMessage,
@@ -97,7 +98,7 @@ export class Chat extends plugin {
         })
         if (approvalInput.handled) {
             if (approvalInput.message) await this.reply(approvalInput.message, true)
-            return false
+            return true
         }
 
         // 缓存群消息
@@ -601,6 +602,12 @@ export class Chat extends plugin {
 
         const userId = e.user_id?.toString()
         const groupId = e.group_id?.toString() || null
+        const conversationId = groupId ? `group:${groupId}` : contextManager.getConversationId(userId, null)
+        const requestStartedAt = Date.now()
+        const isRequestObsolete = () => {
+            const state = presetManager.clearedContexts?.get(conversationId)
+            return !!state && state.clearedAt >= requestStartedAt
+        }
 
         // 构建请求
         const chatOptions = {
@@ -625,6 +632,9 @@ export class Chat extends plugin {
             }
 
             const result = await chatService.sendMessage(chatOptions)
+            if (isRequestObsolete()) {
+                return true
+            }
 
             // 处理回复
             if (result.response && result.response.length > 0) {

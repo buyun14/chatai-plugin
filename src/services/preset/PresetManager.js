@@ -458,7 +458,21 @@ export class PresetManager {
      * @returns {boolean}
      */
     isContextCleared(conversationId) {
-        return false
+        const state = this.clearedContexts.get(conversationId)
+        if (!state) return false
+
+        const expireTime = 5 * 60 * 1000
+        if (Date.now() - state.clearedAt > expireTime) {
+            this.clearedContexts.delete(conversationId)
+            return false
+        }
+
+        if (state.useCount >= state.maxUses) {
+            return false
+        }
+
+        state.useCount++
+        return true
     }
 
     /**

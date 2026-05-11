@@ -1335,8 +1335,7 @@ export class AbstractClient {
             // 保存模型响应
             if (this.shouldPersistHistory(modelResponse)) {
                 const filteredResponse = this.filterToolCallJsonFromResponse(modelResponse)
-                // 过滤后内容不为空才保存
-                if (filteredResponse.content?.length > 0) {
+                if (filteredResponse.content?.length > 0 || filteredResponse.toolCalls?.length > 0) {
                     await this.historyManager.saveHistory(filteredResponse, options.conversationId)
                 }
             }

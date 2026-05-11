@@ -631,13 +631,12 @@ export class McpManager {
             throw new Error('Cannot update builtin server')
         }
 
-        // 更新 JSON 文件
         this.loadServersConfig()
         this.serversConfig.servers[name] = serverConfig
         this.saveServersConfig()
 
-        // Reconnect
-        await this.reloadServer(name)
+        await this.disconnectServer(name)
+        await this.connectServer(name, serverConfig)
         return this.getServer(name)
     }
 
@@ -877,6 +876,8 @@ export class McpManager {
                 isDangerousBlocked: true
             }
         }
+
+        args = this.normalizeToolArgs(args)
 
         if (options.useCache) {
             const cacheKey = `${name}:${JSON.stringify(args)}`
@@ -1304,6 +1305,24 @@ export class McpManager {
      */
     getToolStats() {
         return builtinMcpServer.getToolStats()
+    }
+
+    normalizeToolArgs(args) {
+        if (args && typeof args === 'object' && !Array.isArray(args)) {
+            return args
+        }
+        if (args === undefined || args === null || args === '') {
+            return {}
+        }
+        if (typeof args === 'string') {
+            try {
+                const parsed = JSON.parse(args)
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    return parsed
+                }
+            } catch (error) {}
+        }
+        return { value: args }
     }
 
     /**

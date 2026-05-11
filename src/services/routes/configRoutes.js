@@ -478,10 +478,21 @@ router.put('/mcp-server', async (req, res) => {
 
         if (enabled !== undefined) current.enabled = !!enabled
         if (apiKey !== undefined) current.apiKey = apiKey
+        if (current.enabled && !current.apiKey) {
+            const crypto = await import('node:crypto')
+            current.apiKey = `mcp-${crypto.randomBytes(24).toString('hex')}`
+        }
 
         config.set('mcp.server', current)
         chatLogger.info(`[ConfigRoutes] MCP Server 配置已更新: enabled=${current.enabled}`)
-        res.json(ChaiteResponse.ok({ success: true }))
+        res.json(
+            ChaiteResponse.ok({
+                enabled: current.enabled === true,
+                apiKey: current.apiKey || '',
+                mcpEnabled: config.get('mcp.enabled') !== false,
+                endpoint: '/chatai/mcp'
+            })
+        )
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))
     }
@@ -496,9 +507,17 @@ router.post('/mcp-server/generate-key', async (req, res) => {
         const apiKey = `mcp-${crypto.randomBytes(24).toString('hex')}`
         const current = config.get('mcp.server') || {}
         current.apiKey = apiKey
+        current.enabled = true
         config.set('mcp.server', current)
-        chatLogger.info('[ConfigRoutes] MCP Server API Key 已生成')
-        res.json(ChaiteResponse.ok({ apiKey }))
+        chatLogger.info('[ConfigRoutes] MCP Server API Key 已生成并启用')
+        res.json(
+            ChaiteResponse.ok({
+                enabled: true,
+                apiKey,
+                mcpEnabled: config.get('mcp.enabled') !== false,
+                endpoint: '/chatai/mcp'
+            })
+        )
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))
     }
