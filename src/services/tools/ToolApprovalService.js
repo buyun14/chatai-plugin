@@ -264,8 +264,24 @@ class ToolApprovalService {
             userId: options.userId || options.event?.user_id
         }
 
+        const availableToolNames = new Set(
+            (options.availableTools || []).map(t => t.function?.name || t.name).filter(Boolean)
+        )
+
         for (const toolCall of toolCalls || []) {
             const normalized = this.normalizeToolCall(toolCall)
+            if (
+                normalized.name === 'unknown_tool' ||
+                (availableToolNames.size > 0 && !availableToolNames.has(normalized.name))
+            ) {
+                const reason =
+                    normalized.name === 'unknown_tool'
+                        ? '工具未执行：工具名称缺失'
+                        : `工具未执行：未知工具 ${normalized.name}`
+                blockedResults.push(this.createToolResult(toolCall, normalized.name, reason))
+                continue
+            }
+
             const access = toolFilterService.checkToolAccess(normalized.name, presetId, {
                 userPermission,
                 groupId: context.groupId,

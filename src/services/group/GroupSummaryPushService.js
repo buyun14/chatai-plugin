@@ -118,7 +118,7 @@ class GroupSummaryPushService {
             const intervalValue = settings.summaryPushIntervalValue || globalPush.intervalValue || 1
             const pushHour = settings.summaryPushHour ?? globalPush.pushHour ?? 20
             const messageCount = settings.summaryPushMessageCount || globalPush.messageCount || 100
-            const model = globalPush.model || ''
+            const model = settings.summaryModel || globalPush.model || config.get('features.groupSummary.model') || ''
 
             if (!this._shouldPushNow(groupId, intervalType, intervalValue, pushHour, currentHour, currentMinute)) {
                 continue
@@ -140,7 +140,7 @@ class GroupSummaryPushService {
                 const intervalValue = globalPush.intervalValue || 1
                 const pushHour = globalPush.pushHour ?? 20
                 const messageCount = globalPush.messageCount || 100
-                const model = globalPush.model || ''
+                const model = globalPush.model || config.get('features.groupSummary.model') || ''
 
                 if (
                     !this._shouldPushNow(

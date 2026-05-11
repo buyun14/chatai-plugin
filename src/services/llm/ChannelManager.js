@@ -729,6 +729,8 @@ export class ChannelManager {
                         channel.baseUrls = [normalizedUrl]
                         channel.selectedBaseUrlIndex = 0
                     }
+                } else if (field === 'advanced') {
+                    channel.advanced = this.normalizeAdvanced(updates.advanced)
                 } else {
                     channel[field] = updates[field]
                 }
@@ -896,32 +898,36 @@ export class ChannelManager {
      * 获取Gemini模型列表
      */
     async fetchGeminiModels(channel) {
-        // Gemini暂无公开的模型列表API
-        // 返回已知模型
-        return [
-            'gemini-pro',
-            'gemini-pro-vision',
-            'gemini-1.5-pro',
-            'gemini-1.5-pro-latest',
-            'gemini-1.5-flash',
-            'gemini-1.5-flash-latest',
-            'gemini-1.5-flash-8b',
-            'gemini-2.0-flash-exp',
-            'text-embedding-004'
-        ]
+        const { GeminiClient } = await import('../../core/adapters/index.js')
+        const keyInfo = this.getChannelKey(channel, { recordUsage: false })
+        const client = new GeminiClient({
+            apiKey: keyInfo.key,
+            baseUrl: this.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+            modelsPath: channel.modelsPath || '',
+            endpoints: channel.endpoints || {},
+            channelId: channel.id,
+            channelName: channel.name,
+            features: ['chat']
+        })
+        return await client.listModels()
     }
 
     /**
      * 获取Claude模型列表
      */
     async fetchClaudeModels(channel) {
-        return [
-            'claude-3-5-sonnet-20241022',
-            'claude-3-5-haiku-20241022',
-            'claude-3-opus-20240229',
-            'claude-3-sonnet-20240229',
-            'claude-3-haiku-20240307'
-        ]
+        const { ClaudeClient } = await import('../../core/adapters/index.js')
+        const keyInfo = this.getChannelKey(channel, { recordUsage: false })
+        const client = new ClaudeClient({
+            apiKey: keyInfo.key,
+            baseUrl: this.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+            modelsPath: channel.modelsPath || '',
+            endpoints: channel.endpoints || {},
+            channelId: channel.id,
+            channelName: channel.name,
+            features: ['chat']
+        })
+        return await client.listModels()
     }
 
     /**

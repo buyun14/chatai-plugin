@@ -16,6 +16,16 @@ import './converter.js'
 /**
  * Claude客户端实现
  */
+function getClaudeThinkingConfig(options = {}, clientOptions = {}) {
+    const enableReasoning = options.enableReasoning ?? clientOptions.enableReasoning ?? false
+    if (!enableReasoning) return undefined
+    const maxTokens = options.maxToken || 4096
+    if (maxTokens <= 1024) return undefined
+    const fallbackBudget = Math.max(1024, Math.min(Math.floor(maxTokens / 2), maxTokens - 1))
+    const budgetTokens = options.reasoningBudgetTokens ?? clientOptions.reasoningBudgetTokens ?? fallbackBudget
+    return { type: 'enabled', budget_tokens: Math.max(1024, Math.min(budgetTokens, maxTokens - 1)) }
+}
+
 export class ClaudeClient extends AbstractClient {
     /**
      * @param {BaseClientOptions | Partial<BaseClientOptions>} options
@@ -26,6 +36,55 @@ export class ClaudeClient extends AbstractClient {
         this.name = 'claude'
     }
 
+    normalizeClaudeEndpointPath(endpointPath) {
+        const path = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`
+        if (
+            path === '/messages' ||
+            path.startsWith('/messages/') ||
+            path === '/models' ||
+            path.startsWith('/models/')
+        ) {
+            return `/v1${path}`
+        }
+        return path
+    }
+
+    buildClaudeClientOptions(apiKey, endpointMap = {}) {
+        const baseURL = this.baseUrl ? this.baseUrl.replace(/\/v1\/?$/i, '') : undefined
+        const baseUrlClean = baseURL?.replace(/\/+$/, '') || ''
+        const clientOptions = { apiKey, baseURL }
+        const entries = Object.entries(endpointMap).filter(([, endpointPath]) => endpointPath)
+
+        if (baseUrlClean && entries.length > 0) {
+            clientOptions.fetch = async (url, init) => {
+                const originalUrl = url.toString()
+                const parsed = new URL(originalUrl)
+                const match = entries.find(
+                    ([apiPath]) => parsed.pathname === apiPath || parsed.pathname.startsWith(`${apiPath}/`)
+                )
+                if (!match) return fetch(url, init)
+
+                const [apiPath, endpointPath] = match
+                const normalizedEndpointPath = this.normalizeClaudeEndpointPath(endpointPath)
+                const suffix = parsed.pathname.slice(apiPath.length)
+                const targetUrl = `${baseUrlClean}${normalizedEndpointPath}${suffix}${parsed.search}`
+                logger.debug(`[Claude适配器] 使用自定义端点: ${targetUrl}`)
+                return fetch(targetUrl, init)
+            }
+        }
+
+        return clientOptions
+    }
+
+    getClaudeEndpointMap() {
+        const endpointMap = {}
+        const chatPath = this.endpoints?.chat || this.chatPath
+        const modelsPath = this.endpoints?.models || this.modelsPath
+        if (chatPath) endpointMap['/v1/messages'] = chatPath
+        if (modelsPath) endpointMap['/v1/models'] = modelsPath
+        return endpointMap
+    }
+
     /**
      * 发送消息到Claude
      * @param {IMessage[]} histories
@@ -34,21 +93,7 @@ export class ClaudeClient extends AbstractClient {
      * @returns {Promise<HistoryMessage & { usage: ModelUsage }>}
      */
     async _sendMessage(histories, apiKey, options) {
-        // 支持自定义端点配置
-        const customChatPath = this.endpoints?.chat || this.chatPath
-        let baseURL = this.baseUrl
-
-        // 如果配置了自定义聊天端点，需要构建完整的URL
-        if (customChatPath) {
-            const baseUrlClean = this.baseUrl?.replace(/\/+$/, '') || ''
-            baseURL = baseUrlClean + (customChatPath.startsWith('/') ? customChatPath : '/' + customChatPath)
-            logger.debug(`[Claude适配器] 使用自定义对话端点: ${baseURL}`)
-        }
-
-        const client = new Anthropic({
-            apiKey,
-            baseURL: baseURL
-        })
+        const client = new Anthropic(this.buildClaudeClientOptions(apiKey, this.getClaudeEndpointMap()))
 
         const model = options.model || 'claude-3-5-sonnet-20241022'
 
@@ -92,15 +137,19 @@ export class ClaudeClient extends AbstractClient {
         const toolConvert = getFromChaiteToolConverter('claude')
         const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
 
-        // 调用API
-        const response = await client.messages.create({
+        const requestPayload = {
             model,
             max_tokens: options.maxToken || 4096,
             temperature: options.temperature,
             system: systemPrompt || undefined,
             messages,
             tools
-        })
+        }
+        const thinking = getClaudeThinkingConfig(options, this.options)
+        if (thinking) requestPayload.thinking = thinking
+
+        // 调用API
+        const response = await client.messages.create(requestPayload)
 
         logger.info('[Claude适配器] API响应:', JSON.stringify(response).substring(0, 300))
 
@@ -164,20 +213,7 @@ export class ClaudeClient extends AbstractClient {
      */
     async streamMessage(histories, options) {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
-        // 支持自定义端点配置
-        const customChatPath = this.endpoints?.chat || this.chatPath
-        let baseURL = this.baseUrl
-
-        if (customChatPath) {
-            const baseUrlClean = this.baseUrl?.replace(/\/+$/, '') || ''
-            baseURL = baseUrlClean + (customChatPath.startsWith('/') ? customChatPath : '/' + customChatPath)
-            logger.debug(`[Claude适配器] 流式使用自定义对话端点: ${baseURL}`)
-        }
-
-        const client = new Anthropic({
-            apiKey,
-            baseURL: baseURL
-        })
+        const client = new Anthropic(this.buildClaudeClientOptions(apiKey, this.getClaudeEndpointMap()))
 
         const model = options.model || 'claude-3-5-sonnet-20241022'
 
@@ -214,7 +250,7 @@ export class ClaudeClient extends AbstractClient {
         const toolConvert = getFromChaiteToolConverter('claude')
         const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
 
-        const stream = await client.messages.create({
+        const requestPayload = {
             model,
             max_tokens: options.maxToken || 4096,
             temperature: options.temperature,
@@ -222,7 +258,11 @@ export class ClaudeClient extends AbstractClient {
             messages,
             tools,
             stream: true
-        })
+        }
+        const thinking = getClaudeThinkingConfig(options, this.options)
+        if (thinking) requestPayload.thinking = thinking
+
+        const stream = await client.messages.create(requestPayload)
 
         async function* generator() {
             for await (const event of stream) {
@@ -251,16 +291,46 @@ export class ClaudeClient extends AbstractClient {
      * @returns {Promise<string[]>}
      */
     async listModels() {
-        return [
+        const fallbackModels = [
+            'claude-opus-4-7',
+            'claude-opus-4-6',
+            'claude-sonnet-4-6',
+            'claude-haiku-4-5',
+            'claude-haiku-4-5-20251001',
+            'claude-opus-4-5',
+            'claude-opus-4-5-20251101',
+            'claude-sonnet-4-5',
+            'claude-sonnet-4-5-20250929',
+            'claude-opus-4-1',
+            'claude-opus-4-1-20250805',
+            'claude-opus-4-0',
+            'claude-opus-4-20250514',
+            'claude-sonnet-4-0',
+            'claude-sonnet-4-20250514',
             'claude-3-5-sonnet-20241022',
             'claude-3-5-haiku-20241022',
             'claude-3-opus-20240229',
             'claude-3-sonnet-20240229',
-            'claude-3-haiku-20240307',
-            'claude-2.1',
-            'claude-2.0',
-            'claude-instant-1.2'
+            'claude-3-haiku-20240307'
         ]
+
+        try {
+            const apiKey = await import('../../utils/helpers.js').then(m =>
+                m.getKey(this.apiKey, this.multipleKeyStrategy)
+            )
+            const client = new Anthropic(this.buildClaudeClientOptions(apiKey, this.getClaudeEndpointMap()))
+            const models = await client.models.list()
+            const data = Array.isArray(models?.data) ? models.data : []
+            if (data.length > 0)
+                return data
+                    .map(model => model.id)
+                    .filter(Boolean)
+                    .sort()
+        } catch (error) {
+            logger.warn(`[Claude适配器] 获取模型列表失败，使用内置列表: ${error.message}`)
+        }
+
+        return fallbackModels
     }
 
     /**
@@ -269,14 +339,46 @@ export class ClaudeClient extends AbstractClient {
      * @returns {Promise<Object>}
      */
     async getModelInfo(modelId) {
+        try {
+            const apiKey = await import('../../utils/helpers.js').then(m =>
+                m.getKey(this.apiKey, this.multipleKeyStrategy)
+            )
+            const client = new Anthropic(this.buildClaudeClientOptions(apiKey, this.getClaudeEndpointMap()))
+            const model = await client.models.retrieve(modelId)
+            return {
+                id: model.id || modelId,
+                name: model.display_name || model.displayName || modelId,
+                createdAt: model.created_at || model.createdAt,
+                contextWindow: model.context_window,
+                maxOutput: model.max_output_tokens,
+                capabilities: model.capabilities,
+                supported: true
+            }
+        } catch (error) {
+            logger.warn(`[Claude适配器] 获取模型信息失败，使用内置信息: ${error.message}`)
+        }
+
         const knownModels = {
+            'claude-opus-4-7': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-opus-4-6': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-sonnet-4-6': { contextWindow: 200000, maxOutput: 64000 },
+            'claude-haiku-4-5': { contextWindow: 200000, maxOutput: 8192 },
+            'claude-haiku-4-5-20251001': { contextWindow: 200000, maxOutput: 8192 },
+            'claude-opus-4-5': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-opus-4-5-20251101': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-sonnet-4-5': { contextWindow: 200000, maxOutput: 64000 },
+            'claude-sonnet-4-5-20250929': { contextWindow: 200000, maxOutput: 64000 },
+            'claude-opus-4-1': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-opus-4-1-20250805': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-opus-4-0': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-opus-4-20250514': { contextWindow: 200000, maxOutput: 32000 },
+            'claude-sonnet-4-0': { contextWindow: 200000, maxOutput: 64000 },
+            'claude-sonnet-4-20250514': { contextWindow: 200000, maxOutput: 64000 },
             'claude-3-5-sonnet-20241022': { contextWindow: 200000, maxOutput: 8192 },
             'claude-3-5-haiku-20241022': { contextWindow: 200000, maxOutput: 8192 },
             'claude-3-opus-20240229': { contextWindow: 200000, maxOutput: 4096 },
             'claude-3-sonnet-20240229': { contextWindow: 200000, maxOutput: 4096 },
-            'claude-3-haiku-20240307': { contextWindow: 200000, maxOutput: 4096 },
-            'claude-2.1': { contextWindow: 200000, maxOutput: 4096 },
-            'claude-2.0': { contextWindow: 100000, maxOutput: 4096 }
+            'claude-3-haiku-20240307': { contextWindow: 200000, maxOutput: 4096 }
         }
 
         const info = knownModels[modelId]

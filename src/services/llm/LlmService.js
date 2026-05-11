@@ -91,6 +91,12 @@ export class LlmService {
                 options.imageConfig = channel.imageConfig
             }
             const chThinking = channel.advanced?.thinking
+            if (options.enableReasoning === undefined && chThinking?.enableReasoning !== undefined) {
+                enableReasoning = config.get('thinking.enabled') !== false ? chThinking.enableReasoning : false
+            }
+            if (options.reasoningEffort === undefined && chThinking?.defaultLevel) {
+                reasoningEffort = chThinking.defaultLevel
+            }
             if (thinkingVendorControl === undefined && chThinking?.vendorThinkingControl !== undefined) {
                 thinkingVendorControl = chThinking.vendorThinkingControl
             }
@@ -172,7 +178,8 @@ export class LlmService {
             tools,
             enableReasoning,
             reasoningEffort,
-            thinkingVendorControl
+            thinkingVendorControl,
+            reasoningBudgetTokens: options.reasoningBudgetTokens
         }
 
         if (options.apiInterface || options.openaiApiInterface) {
@@ -248,9 +255,23 @@ export class LlmService {
         const ClientClass =
             adapterType === 'gemini' ? GeminiClient : adapterType === 'claude' ? ClaudeClient : OpenAIClient
 
+        const keyInfo = channelManager.getChannelKey(channel)
+
         return new ClientClass({
-            apiKey: channel.apiKey,
-            baseUrl: channel.baseUrl,
+            apiKey: keyInfo.key,
+            baseUrl: channelManager.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+            chatPath: channel.chatPath || '',
+            modelsPath: channel.modelsPath || '',
+            responsePath: channel.responsePath || channel.endpoints?.responses || '',
+            endpoints: channel.endpoints || {},
+            apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            customHeaders: channel.customHeaders || {},
+            headersTemplate: channel.headersTemplate || '',
+            requestBodyTemplate: channel.requestBodyTemplate || '',
+            imageConfig: channel.imageConfig || {},
+            channelId: channel.id,
+            channelName: channel.name,
             features: ['embedding']
         })
     }
@@ -267,7 +288,7 @@ export class LlmService {
         const { channelManager } = await import('./ChannelManager.js')
         await channelManager.init()
 
-        let targetModel = options.model || config.get('llm.defaultModel')
+        let targetModel = options.model || config.get('llm.models.chat') || config.get('llm.defaultModel')
         let channel = null
         if (options.groupId) {
             try {
@@ -307,12 +328,23 @@ export class LlmService {
 
         const clientOptions = {
             apiKey: keyInfo.key,
-            baseUrl: channel.baseUrl,
+            baseUrl: channelManager.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+            chatPath: channel.chatPath || '',
+            modelsPath: channel.modelsPath || '',
+            responsePath: channel.responsePath || channel.endpoints?.responses || '',
+            endpoints: channel.endpoints || {},
+            apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            experimental: channel.experimental || {},
+            customHeaders: channel.customHeaders || {},
+            headersTemplate: channel.headersTemplate || '',
+            requestBodyTemplate: channel.requestBodyTemplate || '',
+            channelId: channel.id,
+            channelName: channel.name,
             features: ['chat'],
             tools: [],
             imageConfig: channel.imageConfig || {}
         }
-        if (channel.chatPath) clientOptions.chatPath = channel.chatPath
 
         const client = new ClientClass(clientOptions)
         client._channelInfo = {
@@ -331,7 +363,12 @@ export class LlmService {
      * @returns {string} 模型名称
      */
     static getModel() {
-        // 优先使用 defaultModel 配置
+        // 优先使用对话分类模型，再回退默认模型
+        const categoryModel = config.get('llm.models.chat')
+        if (typeof categoryModel === 'string' && categoryModel.trim()) {
+            return categoryModel.trim()
+        }
+
         const defaultModel = config.get('llm.defaultModel')
         if (typeof defaultModel === 'string' && defaultModel.trim()) {
             return defaultModel.trim()

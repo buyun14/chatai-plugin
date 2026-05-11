@@ -8,6 +8,55 @@ import { ApiResponse } from './shared.js'
 
 const router = express.Router()
 
+function getAdapterClientClass(adapterType = 'openai') {
+    switch (adapterType) {
+        case 'gemini':
+            return import('../../core/adapters/index.js').then(m => m.GeminiClient)
+        case 'claude':
+            return import('../../core/adapters/index.js').then(m => m.ClaudeClient)
+        default:
+            return import('../../core/adapters/index.js').then(m => m.OpenAIClient)
+    }
+}
+
+async function createChannelTestClient({ adapterType, apiKey, baseUrl, channel = {}, overrides = {} }) {
+    const ClientClass = await getAdapterClientClass(adapterType)
+    const thinking = channel.advanced?.thinking || {}
+    const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
+    return new ClientClass({
+        apiKey,
+        baseUrl,
+        chatPath: overrides.chatPath ?? channel.chatPath ?? '',
+        modelsPath: overrides.modelsPath ?? channel.modelsPath ?? '',
+        responsePath: overrides.responsePath ?? channel.responsePath ?? channel.endpoints?.responses ?? '',
+        endpoints: overrides.endpoints ?? channel.endpoints ?? {},
+        apiInterface:
+            overrides.apiInterface ??
+            overrides.openaiApiInterface ??
+            channel.apiInterface ??
+            channel.openaiApiInterface ??
+            'chat',
+        openaiApiInterface:
+            overrides.apiInterface ??
+            overrides.openaiApiInterface ??
+            channel.apiInterface ??
+            channel.openaiApiInterface ??
+            'chat',
+        experimental: overrides.experimental ?? channel.experimental ?? {},
+        customHeaders: channel.customHeaders || {},
+        headersTemplate: channel.headersTemplate || '',
+        requestBodyTemplate: channel.requestBodyTemplate || '',
+        imageConfig: channel.imageConfig || {},
+        enableReasoning,
+        reasoningEffort: thinking.defaultLevel || 'low',
+        thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto',
+        channelId: channel.id,
+        channelName: channel.name,
+        features: ['chat'],
+        tools: []
+    })
+}
+
 // GET /api/channels/list
 router.get('/list', async (req, res) => {
     try {
@@ -167,117 +216,119 @@ router.post('/test', async (req, res) => {
     }
 
     try {
-        if (adapterType === 'openai') {
-            const { OpenAIClient } = await import('../../core/adapters/index.js')
-            const client = new OpenAIClient({
-                apiKey: apiKey || config.get('openai.apiKey'),
-                baseUrl: baseUrl || config.get('openai.baseUrl'),
-                chatPath: chatPath, // 自定义对话路径
+        const channel = id ? channelManager.get(id) || {} : {}
+        const client = await createChannelTestClient({
+            adapterType,
+            apiKey: apiKey || (adapterType === 'openai' ? config.get('openai.apiKey') : ''),
+            baseUrl: baseUrl || (adapterType === 'openai' ? config.get('openai.baseUrl') : ''),
+            channel: { ...channel, customHeaders, headersTemplate, requestBodyTemplate, imageConfig },
+            overrides: {
+                chatPath,
                 responsePath,
                 endpoints: endpoints || {},
                 apiInterface: apiInterface || openaiApiInterface || 'chat',
                 openaiApiInterface: apiInterface || openaiApiInterface || 'chat',
-                experimental: experimental || {},
-                customHeaders, // 自定义请求头
-                headersTemplate, // 请求头模板
-                requestBodyTemplate, // 请求体模板
-                imageConfig, // 图片处理配置
-                features: ['chat'],
-                tools: []
-            })
-
-            const testModel = models && models.length > 0 ? models[0] : 'gpt-3.5-turbo'
-            // 应用模型映射/重定向
-            let actualTestModel = testModel
-            if (id) {
-                const mapping = channelManager.getActualModel(id, testModel)
-                if (mapping.mapped) {
-                    actualTestModel = mapping.actualModel
-                    chatLogger.info(`[渠道测试] 模型重定向: ${testModel} -> ${actualTestModel}`)
-                }
+                experimental: experimental || {}
             }
-            const useStreaming = advanced?.streaming?.enabled || false
-            const temperature = advanced?.llm?.temperature ?? 0.7
-            const maxTokens = advanced?.llm?.maxTokens || 100
+        })
 
-            const options = {
-                model: actualTestModel,
-                maxToken: maxTokens,
-                temperature
-            }
-
-            let replyText = ''
-            let apiUsage = null
-
-            if (useStreaming) {
-                const stream = await client.streamMessage(
-                    [{ role: 'user', content: [{ type: 'text', text: testMessage }] }],
-                    options
-                )
-                for await (const chunk of stream) {
-                    if (typeof chunk === 'string') {
-                        replyText += chunk
-                    } else if (chunk.type === 'text') {
-                        replyText += chunk.text
-                    } else if (chunk.type === 'usage' || chunk.usage) {
-                        apiUsage = chunk.usage || chunk
-                    }
-                }
-            } else {
-                const response = await client.sendMessage(
-                    { role: 'user', content: [{ type: 'text', text: testMessage }] },
-                    options
-                )
-                if (!response || !response.contents || !Array.isArray(response.contents)) {
-                    return res.status(500).json(ApiResponse.fail(null, '连接失败: API响应格式不正确'))
-                }
-                replyText = response.contents
-                    .filter(c => c && c.type === 'text')
-                    .map(c => c.text)
-                    .join('')
-                apiUsage = response.usage
-            }
-
-            const elapsed = Date.now() - startTime
-
-            await statsService.recordApiCall({
-                channelId: id || 'test',
-                channelName,
-                model: testModel,
-                keyIndex: usedKeyIndex,
-                keyName: usedKeyName,
-                strategy: usedStrategy,
-                duration: elapsed,
-                success: true,
-                source: 'test',
-                responseText: replyText || '',
-                apiUsage
-            })
-
-            if (id) {
-                const channel = channelManager.get(id)
-                if (channel) {
-                    channel.status = 'active'
-                    channel.lastHealthCheck = Date.now()
-                    channel.testedAt = Date.now()
-                    await channelManager.saveToConfig()
-                }
-            }
-
-            res.json(
-                ApiResponse.ok({
-                    success: true,
-                    message: `连接成功！耗时 ${elapsed}ms`,
-                    testResponse: replyText,
-                    elapsed,
-                    model: testModel,
-                    keyInfo:
-                        usedKeyIndex >= 0 ? { index: usedKeyIndex, name: usedKeyName, strategy: usedStrategy } : null
-                })
-            )
-        } else {
-            res.json(ApiResponse.ok({ success: true, message: '该适配器暂不支持测试' }))
+        const defaultModels = {
+            openai: 'gpt-3.5-turbo',
+            gemini: 'gemini-2.5-flash',
+            claude: 'claude-3-5-sonnet-20241022'
         }
+        const testModel = models && models.length > 0 ? models[0] : defaultModels[adapterType] || defaultModels.openai
+        let actualTestModel = testModel
+        if (id) {
+            const mapping = channelManager.getActualModel(id, testModel)
+            if (mapping.mapped) {
+                actualTestModel = mapping.actualModel
+                chatLogger.info(`[渠道测试] 模型重定向: ${testModel} -> ${actualTestModel}`)
+            }
+        }
+        const useStreaming = advanced?.streaming?.enabled || false
+        const temperature = advanced?.llm?.temperature ?? 0.7
+        const maxTokens = advanced?.llm?.maxTokens || 100
+        const thinking = advanced?.thinking || {}
+        const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
+
+        const options = {
+            model: actualTestModel,
+            maxToken: maxTokens,
+            temperature,
+            enableReasoning,
+            reasoningEffort: thinking.defaultLevel || 'low',
+            thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+        }
+
+        let replyText = ''
+        let apiUsage = null
+
+        if (useStreaming) {
+            const stream = await client.streamMessage(
+                [{ role: 'user', content: [{ type: 'text', text: testMessage }] }],
+                options
+            )
+            for await (const chunk of stream) {
+                if (typeof chunk === 'string') {
+                    replyText += chunk
+                } else if (chunk.type === 'text') {
+                    replyText += chunk.text
+                } else if (chunk.type === 'usage' || chunk.usage) {
+                    apiUsage = chunk.usage || chunk
+                }
+            }
+        } else {
+            const response = await client.sendMessage(
+                { role: 'user', content: [{ type: 'text', text: testMessage }] },
+                options
+            )
+            if (!response || !response.contents || !Array.isArray(response.contents)) {
+                return res.status(500).json(ApiResponse.fail(null, '连接失败: API响应格式不正确'))
+            }
+            replyText = response.contents
+                .filter(c => c && c.type === 'text')
+                .map(c => c.text)
+                .join('')
+            apiUsage = response.usage
+        }
+
+        const elapsed = Date.now() - startTime
+
+        await statsService.recordApiCall({
+            channelId: id || 'test',
+            channelName,
+            model: testModel,
+            keyIndex: usedKeyIndex,
+            keyName: usedKeyName,
+            strategy: usedStrategy,
+            duration: elapsed,
+            success: true,
+            source: 'test',
+            responseText: replyText || '',
+            apiUsage
+        })
+
+        if (id) {
+            const channel = channelManager.get(id)
+            if (channel) {
+                channel.status = 'active'
+                channel.lastHealthCheck = Date.now()
+                channel.testedAt = Date.now()
+                await channelManager.saveToConfig()
+            }
+        }
+
+        res.json(
+            ApiResponse.ok({
+                success: true,
+                message: `连接成功！耗时 ${elapsed}ms`,
+                testResponse: replyText,
+                elapsed,
+                model: testModel,
+                keyInfo: usedKeyIndex >= 0 ? { index: usedKeyIndex, name: usedKeyName, strategy: usedStrategy } : null
+            })
+        )
     } catch (error) {
         const elapsed = Date.now() - startTime
         chatLogger.error('[测试渠道] 错误:', error.message)
@@ -372,72 +423,24 @@ router.post('/fetch-models', async (req, res) => {
     baseUrl = normalizeBaseUrl(baseUrl, adapterType)
 
     try {
-        if (adapterType === 'openai') {
-            chatLogger.debug(`[获取模型] 使用BaseURL: ${baseUrl}`)
-            // 如果有自定义 modelsPath，使用自定义路径获取模型
-            if (modelsPath) {
-                const finalUrl =
-                    baseUrl.replace(/\/+$/, '') + (modelsPath.startsWith('/') ? modelsPath : '/' + modelsPath)
-                chatLogger.debug(`[获取模型] 使用自定义路径: ${finalUrl}`)
+        chatLogger.debug(`[获取模型] 使用BaseURL: ${baseUrl}, 适配器: ${adapterType}`)
+        const ClientClass = await getAdapterClientClass(adapterType)
+        const client = new ClientClass({
+            apiKey: apiKey || (adapterType === 'openai' ? config.get('openai.apiKey') : ''),
+            baseUrl,
+            modelsPath: modelsPath || '',
+            endpoints: modelsPath ? { models: modelsPath } : {},
+            features: ['chat']
+        })
 
-                const response = await fetch(finalUrl, {
-                    method: 'GET',
-                    headers: {
-                        Authorization: `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
-                })
-
-                if (!response.ok) {
-                    const text = await response.text()
-                    throw new Error(`API请求失败: ${response.status} ${text}`)
-                }
-
-                const data = await response.json()
-                let models = []
-
-                // 支持不同的响应格式
-                if (Array.isArray(data)) {
-                    models = data.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean)
-                } else if (data.data && Array.isArray(data.data)) {
-                    models = data.data.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean)
-                } else if (data.models && Array.isArray(data.models)) {
-                    models = data.models.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean)
-                }
-
-                return res.json(ApiResponse.ok({ models: models.sort() }))
-            }
-
-            // 默认使用 OpenAI SDK
-            const OpenAI = (await import('openai')).default
-            const openai = new OpenAI({
-                apiKey: apiKey || config.get('openai.apiKey'),
-                baseURL: baseUrl,
-                defaultHeaders: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            })
-
-            const modelsList = await openai.models.list()
-
-            if (!modelsList || !modelsList.data || !Array.isArray(modelsList.data)) {
-                return res.status(500).json(ApiResponse.fail(null, 'API返回格式不正确'))
-            }
-
-            const isOfficialOpenAI = baseUrl.includes('api.openai.com')
-            let models = modelsList.data.map(m => m.id)
-
-            if (isOfficialOpenAI) {
-                models = models.filter(
-                    id => id.includes('gpt') || id.includes('text-embedding') || id.includes('o1') || id.includes('o3')
-                )
-            }
-
-            res.json(ApiResponse.ok({ models: models.sort() }))
-        } else {
-            res.status(400).json(ApiResponse.fail(null, '不支持的适配器类型'))
+        let models = await client.listModels()
+        if (adapterType === 'openai' && baseUrl.includes('api.openai.com')) {
+            models = models.filter(
+                id => id.includes('gpt') || id.includes('text-embedding') || id.includes('o1') || id.includes('o3')
+            )
         }
+
+        res.json(ApiResponse.ok({ models: models.sort() }))
     } catch (error) {
         chatLogger.error('[获取模型] 错误:', error.message)
         res.status(500).json(ApiResponse.fail(null, `获取模型失败: ${error.message}`))
@@ -465,8 +468,6 @@ router.post('/batch-test', async (req, res) => {
     const testSingleModel = async model => {
         const startTime = Date.now()
         try {
-            const { OpenAIClient } = await import('../../core/adapters/index.js')
-
             let apiKey = channel.apiKey
             let keyInfo = null
             if (channel.apiKeys && channel.apiKeys.length > 0) {
@@ -474,30 +475,29 @@ router.post('/batch-test', async (req, res) => {
                 apiKey = keyInfo.key
             }
 
-            const client = new OpenAIClient({
+            const client = await createChannelTestClient({
+                adapterType: channel.adapterType || 'openai',
                 apiKey,
-                baseUrl: channel.baseUrl,
-                chatPath: channel.chatPath,
-                responsePath: channel.responsePath || channel.endpoints?.responses || '',
-                endpoints: channel.endpoints || {},
-                apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
-                openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
-                experimental: channel.experimental || {},
-                customHeaders: channel.customHeaders || {},
-                headersTemplate: channel.headersTemplate || '',
-                requestBodyTemplate: channel.requestBodyTemplate || '',
-                imageConfig: channel.imageConfig || {},
-                features: ['chat'],
-                tools: []
+                baseUrl: channelManager.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+                channel
             })
 
             // 应用模型映射/重定向
             const mapping = channelManager.getActualModel(channelId, model)
             const actualModel = mapping.actualModel
 
+            const thinking = channel.advanced?.thinking || {}
+            const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
             const response = await client.sendMessage(
                 { role: 'user', content: [{ type: 'text', text: '说一声你好' }] },
-                { model: actualModel, maxToken: 50, temperature: 0.7 }
+                {
+                    model: actualModel,
+                    maxToken: 50,
+                    temperature: 0.7,
+                    enableReasoning,
+                    reasoningEffort: thinking.defaultLevel || 'low',
+                    thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+                }
             )
 
             const elapsed = Date.now() - startTime
@@ -561,8 +561,6 @@ router.post('/test-model', async (req, res) => {
 
     const startTime = Date.now()
     try {
-        const { OpenAIClient } = await import('../../core/adapters/index.js')
-
         let apiKey = channel.apiKey
         let keyInfo = null
         if (channel.apiKeys && channel.apiKeys.length > 0) {
@@ -570,21 +568,11 @@ router.post('/test-model', async (req, res) => {
             apiKey = keyInfo.key
         }
 
-        const client = new OpenAIClient({
+        const client = await createChannelTestClient({
+            adapterType: channel.adapterType || 'openai',
             apiKey,
-            baseUrl: channel.baseUrl,
-            chatPath: channel.chatPath, // 自定义对话路径
-            responsePath: channel.responsePath || channel.endpoints?.responses || '',
-            endpoints: channel.endpoints || {},
-            apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
-            openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
-            experimental: channel.experimental || {},
-            customHeaders: channel.customHeaders || {},
-            headersTemplate: channel.headersTemplate || '',
-            requestBodyTemplate: channel.requestBodyTemplate || '',
-            imageConfig: channel.imageConfig || {},
-            features: ['chat'],
-            tools: []
+            baseUrl: channelManager.getCurrentBaseUrl(channel.id) || channel.baseUrl,
+            channel
         })
 
         // 应用模型映射/重定向

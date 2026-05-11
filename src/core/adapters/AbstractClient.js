@@ -1313,6 +1313,25 @@ export class AbstractClient {
                 modelResponse.parentId = thisRequestMsg.id
             }
 
+            if (modelResponse.toolCalls && modelResponse.toolCalls.length > 0) {
+                const availableToolNames = new Set(this.tools.map(t => t.function?.name || t.name).filter(Boolean))
+                const executableToolCalls = modelResponse.toolCalls.filter(toolCall => {
+                    const name = toolCall.function?.name || toolCall.name
+                    if (name && availableToolNames.has(name)) return true
+                    this.logger.warn(`[Tool] 忽略无效工具调用: ${name || 'unknown_tool'}`)
+                    return false
+                })
+
+                if (executableToolCalls.length === 0) {
+                    modelResponse.toolCalls = undefined
+                } else if (executableToolCalls.length < modelResponse.toolCalls.length) {
+                    this.logger.info(
+                        `[Tool] 过滤无效工具调用: ${modelResponse.toolCalls.length} -> ${executableToolCalls.length}`
+                    )
+                    modelResponse.toolCalls = executableToolCalls
+                }
+            }
+
             // 保存模型响应
             if (this.shouldPersistHistory(modelResponse)) {
                 const filteredResponse = this.filterToolCallJsonFromResponse(modelResponse)
@@ -1821,12 +1840,49 @@ export class AbstractClient {
      * @returns {Promise<{toolCallResults: Array, toolCallLogs: Array}>}
      */
     async executeToolCalls(toolCalls, options) {
-        const preflight = await toolApprovalService.preflight(toolCalls, {
+        const availableToolNames = new Set(this.tools.map(t => t.function?.name || t.name).filter(Boolean))
+        const validToolCalls = []
+        const toolCallResults = []
+        const toolCallLogs = []
+
+        for (const toolCall of toolCalls || []) {
+            const name = toolCall.function?.name || toolCall.name
+            if (!name || !availableToolNames.has(name)) {
+                const displayName = name || 'unknown_tool'
+                const reason = name ? `工具未执行：未知工具 ${name}` : '工具未执行：工具名称缺失'
+                this.logger.warn(`[Tool] 跳过无效工具调用: ${displayName}`)
+                toolCallResults.push({
+                    tool_call_id: toolCall.id || crypto.randomUUID(),
+                    content: JSON.stringify({
+                        status: 'error',
+                        tool: displayName,
+                        content: reason
+                    }),
+                    type: 'tool',
+                    name: displayName
+                })
+                toolCallLogs.push({
+                    name: displayName,
+                    args: {},
+                    result: reason,
+                    duration: 0,
+                    isError: true
+                })
+                continue
+            }
+            validToolCalls.push(toolCall)
+        }
+
+        if (validToolCalls.length === 0) {
+            return { toolCallResults, toolCallLogs }
+        }
+
+        const preflight = await toolApprovalService.preflight(validToolCalls, {
             ...options,
             availableTools: this.tools
         })
-        const toolCallResults = [...preflight.blockedResults.map(item => item.toolResult)]
-        const toolCallLogs = [...preflight.blockedResults.map(item => item.log)]
+        toolCallResults.push(...preflight.blockedResults.map(item => item.toolResult))
+        toolCallLogs.push(...preflight.blockedResults.map(item => item.log))
         const approvedToolCalls = preflight.approvedToolCalls || []
 
         if (approvedToolCalls.length === 0) {

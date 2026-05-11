@@ -4,6 +4,7 @@
  */
 
 import express from 'express'
+import crypto from 'node:crypto'
 import { asyncHandler } from '../middleware/routeFactory.js'
 import { ChaiteResponse } from './shared.js'
 import config from '../../../config/config.js'
@@ -51,16 +52,15 @@ function savePresets(presets) {
 
 // 生成ID
 function generateId() {
-    return `preset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    return `preset_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`
 }
 
-// 生成UUID
 function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-        const r = (Math.random() * 16) | 0
-        const v = c === 'x' ? r : (r & 0x3) | 0x8
-        return v.toString(16)
-    })
+    return crypto.randomUUID()
+}
+
+function generateEditToken() {
+    return crypto.randomBytes(32).toString('base64url')
 }
 
 // 临时编辑会话存储 (内存中，30分钟过期)
@@ -617,7 +617,7 @@ export function createGameEditRoutes() {
             }
 
             // 生成Token
-            const token = generateUUID()
+            const token = generateEditToken()
             gameEditTokens.set(token, {
                 editId,
                 expiry: session.expiresAt

@@ -610,6 +610,52 @@ class StatsService {
     }
 
     /**
+     * 获取 API 调用记录
+     */
+    async getApiCalls({ page = 1, limit = 20, channelId, success, startTime, endTime } = {}) {
+        const safePage = Math.max(1, Number(page) || 1)
+        const safeLimit = Math.min(200, Math.max(1, Number(limit) || 20))
+        const filter = {}
+        if (channelId) filter.channelId = channelId
+        if (success !== undefined) filter.success = success
+        if (startTime) filter.startTime = startTime
+        if (endTime) filter.endTime = endTime
+
+        const records = await usageStats.getRecent(safePage * safeLimit, filter)
+        const start = (safePage - 1) * safeLimit
+        return {
+            records: records.slice(start, start + safeLimit),
+            pagination: {
+                page: safePage,
+                limit: safeLimit,
+                total: records.length,
+                hasMore: records.length > start + safeLimit
+            }
+        }
+    }
+
+    /**
+     * 获取渠道调用统计
+     */
+    async getChannelStats() {
+        return await usageStats.getChannelRanking(100)
+    }
+
+    /**
+     * 获取模型调用统计
+     */
+    async getModelStats() {
+        return await usageStats.getModelRanking(100)
+    }
+
+    /**
+     * 清除所有统计数据
+     */
+    async clear() {
+        return await this.reset()
+    }
+
+    /**
      * 获取今日API使用统计
      */
     async getUsageTodayStats() {

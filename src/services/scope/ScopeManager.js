@@ -1,3 +1,4 @@
+import config from '../../../config/config.js'
 import { chatLogger } from '../../core/utils/logger.js'
 const logger = chatLogger
 /**
@@ -907,6 +908,7 @@ export class ScopeManager {
             drawModel: undefined,
             searchModel: undefined,
             roleplayModel: undefined,
+            profileModel: undefined,
             toolApprovalMode: undefined
         }
 
@@ -1046,6 +1048,9 @@ export class ScopeManager {
                     }
                     if (featureConfig.roleplayModel === undefined && innerSettings.roleplayModel) {
                         featureConfig.roleplayModel = innerSettings.roleplayModel
+                    }
+                    if (featureConfig.profileModel === undefined && innerSettings.profileModel) {
+                        featureConfig.profileModel = innerSettings.profileModel
                     }
                 }
             }
@@ -2023,18 +2028,28 @@ export async function isGroupFeatureEnabled(groupId, feature, globalDefault) {
  * @param {string} modelKey - 模型配置键名 (summaryModel, imageGenModel 等)
  * @returns {Promise<string|null>}
  */
-export async function getGroupFeatureModel(groupId, modelKey) {
-    if (!groupId) return null
-    try {
-        const sm = await ensureScopeManager()
-        const gs = await sm.getGroupSettings(String(groupId))
-        const val = gs?.settings?.[modelKey]
+export async function getGroupFeatureModel(groupId, modelKey, globalFallbackPaths = []) {
+    if (groupId) {
+        try {
+            const sm = await ensureScopeManager()
+            const gs = await sm.getGroupSettings(String(groupId))
+            const val = gs?.settings?.[modelKey]
+            if (val && typeof val === 'string' && val.trim()) {
+                logger.debug(`[ScopeManager] 使用群组独立 ${modelKey}: ${val} (群: ${groupId})`)
+                return val.trim()
+            }
+        } catch (err) {
+            logger.debug(`[ScopeManager] 获取群组 ${modelKey} 设置失败:`, err.message)
+        }
+    }
+
+    for (const path of globalFallbackPaths) {
+        const val = config.get(path)
         if (val && typeof val === 'string' && val.trim()) {
-            logger.debug(`[ScopeManager] 使用群组独立 ${modelKey}: ${val} (群: ${groupId})`)
+            logger.debug(`[ScopeManager] 使用全局 ${path}: ${val}`)
             return val.trim()
         }
-    } catch (err) {
-        logger.debug(`[ScopeManager] 获取群组 ${modelKey} 设置失败:`, err.message)
     }
+
     return null
 }

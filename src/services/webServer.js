@@ -122,6 +122,7 @@ async function getServerAddressesFast(port) {
 }
 import {
     systemRoutes,
+    statsRoutes,
     configRoutes,
     scopeRoutes,
     toolsRoutes,
@@ -290,7 +291,7 @@ class WebServer {
         this.router = express.Router()
         this.port = config.get('web.port') || 3000
         this.server = null
-        this.mountPath = '/chatai'
+        this.mountPath = config.get('web.mountPath') || '/chatai'
         this.internalToken = crypto.randomBytes(32).toString('base64url')
         this.setupMiddleware()
         this.setupRoutes()
@@ -554,6 +555,7 @@ class WebServer {
         this.router.use('/api/memory', auth, memoryRoutes)
         this.router.use('/api/graph', auth, graphRoutes)
         this.router.use('/api/images', publicImageRouter) // 公开图片访问，无需认证
+        this.router.use('/api/stats', auth, statsRoutes)
         this.router.use('/mcp', mcpServerRoutes) // MCP Server 暴露端点，使用独立 apiKey 鉴权
         this.router.use('/api/group-admin', auth, groupAdminRoutes)
         this.router.use('/api/skills', auth, skillsRoutes)
@@ -705,7 +707,6 @@ class WebServer {
                         if (retries > 0) {
                             chatLogger.warn(`[WebServer] 端口 ${port} 已被占用，尝试释放端口...`)
                             try {
-                                const fetch = (await import('node-fetch')).default
                                 const releaseResult = await Promise.race([
                                     fetch(`http://127.0.0.1:${port}/api/system/release_port`, {
                                         method: 'DELETE',
@@ -813,7 +814,7 @@ class WebServer {
         this.setupMiddleware()
         this.setupRoutes()
         await this.startWithOwnPort()
-        this.addresses = await getServerAddresses(this.port)
+        this.addresses = await getServerAddressesFast(this.port)
 
         chatLogger.info('[WebServer] 服务重载完成')
         return true

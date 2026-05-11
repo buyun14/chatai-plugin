@@ -52,6 +52,7 @@ export class BaseClientOptions {
             if (options.experimental) this.experimental = options.experimental
             if (options.openaiWs) this.openaiWs = options.openaiWs
             if (options.imageConfig) this.imageConfig = options.imageConfig
+            if (options.channelId) this.channelId = options.channelId
             if (options.channelName) this.channelName = options.channelName
             if (options.userAgent) this.userAgent = options.userAgent
             if (options.xff) this.xff = options.xff
@@ -62,6 +63,7 @@ export class BaseClientOptions {
             if (options.enableReasoning !== undefined) this.enableReasoning = options.enableReasoning
             if (options.reasoningEffort !== undefined) this.reasoningEffort = options.reasoningEffort
             if (options.thinkingVendorControl !== undefined) this.thinkingVendorControl = options.thinkingVendorControl
+            if (options.reasoningBudgetTokens !== undefined) this.reasoningBudgetTokens = options.reasoningBudgetTokens
 
             this.init()
         }

@@ -3,8 +3,6 @@
  * 网页搜索、知识检索等
  */
 
-import fetch from 'node-fetch'
-
 /**
  * HTML转Markdown工具函数
  * @param {string} html - HTML内容

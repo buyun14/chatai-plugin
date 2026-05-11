@@ -1197,17 +1197,19 @@ export class OpenAIClient extends AbstractClient {
      */
     async streamMessage(histories, options) {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
-        const client = new OpenAI({
+        const channelProxy = proxyService.getChannelProxyAgent(this.baseUrl)
+        const clientOptions = this.buildOpenAIClientOptions(
             apiKey,
-            baseURL: this.baseUrl,
-            // 添加浏览器请求头避免 CF 拦截
-            defaultHeaders: {
+            {
                 'User-Agent':
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 Accept: 'application/json, text/plain, */*',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
-            }
-        })
+            },
+            channelProxy,
+            this.getOpenAIResponsePath()
+        )
+        const client = new OpenAI(clientOptions)
 
         const messages = []
         const model = options.model || 'gpt-4o-mini'
@@ -1330,14 +1332,23 @@ export class OpenAIClient extends AbstractClient {
             })
         )
 
+        const useResponsesApi = this.shouldUseOpenAIResponses(options)
         let stream
         try {
-            stream = await client.chat.completions.create(requestPayload)
+            if (useResponsesApi) {
+                delete requestPayload.stream_options
+                const responsesPayload = this.buildResponsesPayload(requestPayload, { ...options, stream: true })
+                responsesPayload.stream = true
+                stream = await client.responses.create(responsesPayload)
+            } else {
+                stream = await client.chat.completions.create(requestPayload)
+            }
         } catch (error) {
             logger.error('[OpenAI适配器] Streaming API错误:', error.message)
             throw error
         }
 
+        const self = this
         async function* generator() {
             let allReasoning = '' // 累积所有reasoning_content
             let allContent = '' // 累积content用于<think>标签解析
@@ -1351,6 +1362,37 @@ export class OpenAIClient extends AbstractClient {
             let finalUsage = null // 流式模式下的usage信息
 
             for await (const chunk of stream) {
+                if (useResponsesApi) {
+                    if (chunk.type === 'response.output_text.delta' || chunk.type === 'response.text.delta') {
+                        yield { type: 'text', text: chunk.delta || '' }
+                    } else if (chunk.type === 'response.reasoning_text.delta') {
+                        allReasoning += chunk.delta || ''
+                    } else if (chunk.type === 'response.output_item.done' && chunk.item?.type === 'function_call') {
+                        hasToolCalls = true
+                        const toolCall = self.normalizeResponsesToolCall(chunk.item)
+                        toolCallsMap.set(toolCall.id, toolCall)
+                    } else if (chunk.type === 'response.completed' || chunk.type === 'response.done') {
+                        const usage = chunk.response?.usage
+                        if (usage) {
+                            finalUsage = {
+                                promptTokens: usage.input_tokens,
+                                completionTokens: usage.output_tokens,
+                                totalTokens: usage.total_tokens
+                            }
+                        }
+                        const converted = self.responsesOutputToChatCompletion(chunk.response || {})
+                        for (const tc of converted.choices?.[0]?.message?.tool_calls || []) {
+                            hasToolCalls = true
+                            toolCallsMap.set(tc.id, tc)
+                        }
+                    } else if (chunk.type === 'response.failed' || chunk.type === 'error') {
+                        throw new Error(
+                            chunk.response?.error?.message || chunk.error?.message || 'OpenAI Responses stream error'
+                        )
+                    }
+                    continue
+                }
+
                 // 捕获usage信息（在最后一个chunk中）
                 if (chunk.usage) {
                     finalUsage = {
@@ -1429,12 +1471,16 @@ export class OpenAIClient extends AbstractClient {
 
             // 输出 tool_calls
             if (hasToolCalls) {
-                const toolCalls = Array.from(toolCallsMap.values())
-                logger.debug(
-                    `[OpenAI适配器] 流式检测到 ${toolCalls.length} 个工具调用:`,
-                    toolCalls.map(t => t.function.name).join(', ')
-                )
-                yield { type: 'tool_calls', toolCalls }
+                const toolCalls = Array.from(toolCallsMap.values()).filter(tc => tc.id && tc.function.name)
+                if (toolCalls.length > 0) {
+                    logger.debug(
+                        `[OpenAI适配器] 流式检测到 ${toolCalls.length} 个工具调用:`,
+                        toolCalls.map(t => t.function.name).join(', ')
+                    )
+                    yield { type: 'tool_calls', toolCalls }
+                } else {
+                    logger.warn('[OpenAI适配器] 流式响应包含不完整工具调用，已忽略')
+                }
             }
 
             // 无论是否有 reasoning_content 字段，始终检测并剥离 <think> 标签
@@ -1583,14 +1629,16 @@ export class OpenAIClient extends AbstractClient {
      */
     async getEmbedding(text, options) {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
-        const client = new OpenAI({
+        const channelProxy = proxyService.getChannelProxyAgent(this.baseUrl)
+        const clientOptions = this.buildOpenAIClientOptions(
             apiKey,
-            baseURL: this.baseUrl,
-            defaultHeaders: {
+            {
                 'User-Agent':
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        })
+            },
+            channelProxy
+        )
+        const client = new OpenAI(clientOptions)
 
         const embeddingStartTime = Date.now()
         const embeddings = await client.embeddings.create({
@@ -1656,14 +1704,16 @@ export class OpenAIClient extends AbstractClient {
      */
     async getModelInfo(modelId) {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
-        const client = new OpenAI({
+        const channelProxy = proxyService.getChannelProxyAgent(this.baseUrl)
+        const clientOptions = this.buildOpenAIClientOptions(
             apiKey,
-            baseURL: this.baseUrl,
-            defaultHeaders: {
+            {
                 'User-Agent':
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        })
+            },
+            channelProxy
+        )
+        const client = new OpenAI(clientOptions)
 
         try {
             const model = await client.models.retrieve(modelId)

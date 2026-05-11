@@ -19,6 +19,21 @@ import { statsService } from '../../../services/stats/StatsService.js'
 /**
  * Gemini客户端实现
  */
+function getGeminiThinkingConfig(options = {}, clientOptions = {}) {
+    const enableReasoning = options.enableReasoning ?? clientOptions.enableReasoning ?? false
+    if (!enableReasoning) return undefined
+    const effort = options.reasoningEffort ?? clientOptions.reasoningEffort ?? 'low'
+    const effortBudgetMap = {
+        minimal: 256,
+        low: 1024,
+        medium: 4096,
+        high: 8192
+    }
+    const thinkingBudget =
+        options.reasoningBudgetTokens ?? clientOptions.reasoningBudgetTokens ?? effortBudgetMap[effort] ?? 1024
+    return { thinkingBudget }
+}
+
 export class GeminiClient extends AbstractClient {
     /**
      * @param {BaseClientOptions | Partial<BaseClientOptions>} options
@@ -109,6 +124,13 @@ export class GeminiClient extends AbstractClient {
         const toolConvert = getFromChaiteToolConverter('gemini')
         const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
 
+        const generationConfig = {
+            temperature: options.temperature,
+            maxOutputTokens: options.maxToken
+        }
+        const thinkingConfig = getGeminiThinkingConfig(options, this.options)
+        if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig
+
         // 创建生成式模型
         const generativeModel = genAI.getGenerativeModel(
             {
@@ -116,10 +138,7 @@ export class GeminiClient extends AbstractClient {
                 systemInstruction: systemInstruction || undefined,
                 safetySettings,
                 tools: tools ? [{ functionDeclarations: tools }] : undefined,
-                generationConfig: {
-                    temperature: options.temperature,
-                    maxOutputTokens: options.maxToken
-                }
+                generationConfig
             },
             requestOptions
         )
@@ -254,16 +273,23 @@ export class GeminiClient extends AbstractClient {
         const toolConvert = getFromChaiteToolConverter('gemini')
         const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
 
-        const generativeModel = genAI.getGenerativeModel({
-            model,
-            systemInstruction: systemInstruction || undefined,
-            safetySettings,
-            tools: tools ? [{ functionDeclarations: tools }] : undefined,
-            generationConfig: {
-                temperature: options.temperature,
-                maxOutputTokens: options.maxToken
-            }
-        })
+        const generationConfig = {
+            temperature: options.temperature,
+            maxOutputTokens: options.maxToken
+        }
+        const thinkingConfig = getGeminiThinkingConfig(options, this.options)
+        if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig
+
+        const generativeModel = genAI.getGenerativeModel(
+            {
+                model,
+                systemInstruction: systemInstruction || undefined,
+                safetySettings,
+                tools: tools ? [{ functionDeclarations: tools }] : undefined,
+                generationConfig
+            },
+            requestOptions
+        )
 
         const result = await generativeModel.generateContentStream({
             contents
@@ -408,9 +434,13 @@ export class GeminiClient extends AbstractClient {
 
         if (customModelsPath) {
             const baseUrlClean = baseUrl.replace(/\/+$/, '')
-            // 如果自定义路径是完整路径，直接使用；否则拼接
-            if (customModelsPath.includes('/v1beta')) {
-                modelInfoEndpoint = customModelsPath.replace(/\/+$/, '')
+            if (customModelsPath.includes('/models')) {
+                const customPath = customModelsPath.replace(/\/+$/, '')
+                const modelSuffix = customPath.endsWith('/models') ? '' : '/models'
+                modelInfoEndpoint = `${customPath}${modelSuffix}`
+                baseUrl = baseUrlClean
+            } else if (customModelsPath.includes('/v1beta')) {
+                modelInfoEndpoint = `${customModelsPath.replace(/\/+$/, '')}/models`
                 baseUrl = baseUrlClean
             } else {
                 modelInfoEndpoint = customModelsPath.startsWith('/') ? customModelsPath : '/' + customModelsPath
@@ -419,7 +449,8 @@ export class GeminiClient extends AbstractClient {
         }
 
         try {
-            const modelName = modelId.startsWith('models/') ? modelId : `models/${modelId}`
+            const normalizedModelId = modelId.replace(/^models\//, '')
+            const modelName = modelInfoEndpoint.endsWith('/models') ? normalizedModelId : `models/${normalizedModelId}`
             const response = await fetch(`${baseUrl}${modelInfoEndpoint}/${modelName}?key=${apiKey}`, {
                 method: 'GET',
                 headers: {

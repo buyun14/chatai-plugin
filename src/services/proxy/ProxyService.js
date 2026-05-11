@@ -3,6 +3,16 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { HttpProxyAgent } from 'http-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
+async function getFetch(preferNodeFetch = false) {
+    if (preferNodeFetch) {
+        try {
+            return (await import('node-fetch')).default
+        } catch {}
+    }
+    if (typeof fetch === 'function') return fetch
+    return (await import('node-fetch')).default
+}
+
 /**
  * 代理服务 - 管理不同环境的代理配置
  * 支持的环境:
@@ -284,10 +294,10 @@ class ProxyService {
                 return { success: false, error: '无法创建代理Agent' }
             }
 
-            const fetch = (await import('node-fetch')).default
+            const fetchFn = await getFetch(true)
             const startTime = Date.now()
 
-            const response = await fetch(testUrl, {
+            const response = await fetchFn(testUrl, {
                 agent,
                 timeout: 10000,
                 method: 'HEAD'

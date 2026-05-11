@@ -258,7 +258,8 @@ export class ChatAgent {
         }
 
         // 确定模型
-        let llmModel = model || scopeFeatures.chatModel || scopeModelId || LlmService.getModel()
+        let llmModel =
+            model || scopeFeatures.chatModel || scopeModelId || config.get('llm.models.chat') || LlmService.getModel()
         if (!model && currentPreset?.model?.trim()) {
             llmModel = currentPreset.model.trim()
         }
@@ -405,6 +406,18 @@ export class ChatAgent {
         const maxCharacters = channelLlm.maxCharacters || 0
         enforceMaxCharacters(messages, maxCharacters, 'ChatAgent')
         const channelStreaming = channelAdvanced.streaming || {}
+        const resolveThinkingOptions = targetChannel => {
+            const thinking = targetChannel?.advanced?.thinking || {}
+            return {
+                enableReasoning:
+                    config.get('thinking.enabled') !== false
+                        ? (currentPreset?.enableReasoning ?? thinking.enableReasoning)
+                        : false,
+                reasoningEffort: thinking.defaultLevel || 'low',
+                thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+            }
+        }
+        const thinkingOptions = resolveThinkingOptions(channel)
         const presetParams = currentPreset?.modelParams || {}
 
         // 应用模型映射/重定向
@@ -425,9 +438,7 @@ export class ChatAgent {
             systemOverride: systemPrompt,
             stream: stream || channelStreaming.enabled === true,
             disableHistoryRead: skipHistory,
-            enableReasoning: effectiveEnableReasoning,
-            reasoningEffort: channelThinking.defaultLevel || 'low',
-            thinkingVendorControl: channelThinking.vendorThinkingControl ?? 'auto'
+            ...thinkingOptions
         }
 
         logger.info(`[ChatAgent] 模型: ${llmModel}, 工具: ${allTools.length}个`)
@@ -441,7 +452,8 @@ export class ChatAgent {
                 channel,
                 clientOptions,
                 llmModel,
-                debugInfo
+                debugInfo,
+                resolveThinkingOptions
             })
 
             response = result.response
@@ -640,7 +652,11 @@ export class ChatAgent {
 
             // 用轻量模型做调度判断
             const dispatchModel =
-                config.get('llm.models.dispatch') || config.get('llm.defaultModel') || LlmService.getModel()
+                config.get('llm.models.dispatch') ||
+                config.get('llm.models.tools') ||
+                config.get('llm.models.tool') ||
+                config.get('llm.defaultModel') ||
+                LlmService.getModel()
             const client = await LlmService.getChatClient({
                 model: dispatchModel,
                 groupId: event?.group_id ? String(event.group_id) : undefined,
@@ -1098,7 +1114,7 @@ export class ChatAgent {
      * 发送请求（带回退）
      */
     async _sendWithFallback(client, userMessage, requestOptions, context) {
-        const { channel, clientOptions, llmModel, debugInfo } = context
+        const { channel, clientOptions, llmModel, debugInfo, resolveThinkingOptions } = context
 
         const fallbackConfig = config.get('llm.fallback') || {}
         const fallbackEnabled = fallbackConfig.enabled !== false
@@ -1114,25 +1130,27 @@ export class ChatAgent {
             const currentModel = modelsToTry[modelIndex]
             let retryCount = 0
             let currentClient = client
+            let currentChannel = channel
 
             // 备选模型时获取新渠道
             if (modelIndex > 0) {
-                const newChannel = channelManager.getBestChannel(currentModel)
-                if (newChannel) {
-                    const keyInfo = channelManager.getChannelKey(newChannel)
+                currentChannel = channelManager.getBestChannel(currentModel)
+                if (currentChannel) {
+                    const keyInfo = channelManager.getChannelKey(currentChannel)
                     const newClientOptions = {
                         ...clientOptions,
-                        adapterType: newChannel.adapterType,
-                        baseUrl: newChannel.baseUrl,
+                        adapterType: currentChannel.adapterType,
+                        baseUrl: currentChannel.baseUrl,
                         apiKey: keyInfo.key,
-                        imageConfig: newChannel.imageConfig || clientOptions.imageConfig,
-                        chatPath: newChannel.chatPath || '',
-                        modelsPath: newChannel.modelsPath || '',
-                        responsePath: newChannel.responsePath || newChannel.endpoints?.responses || '',
-                        endpoints: newChannel.endpoints || {},
-                        apiInterface: newChannel.apiInterface || newChannel.openaiApiInterface || 'chat',
-                        openaiApiInterface: newChannel.apiInterface || newChannel.openaiApiInterface || 'chat',
-                        experimental: newChannel.experimental || {}
+                        imageConfig: currentChannel.imageConfig || clientOptions.imageConfig,
+                        chatPath: currentChannel.chatPath || '',
+                        modelsPath: currentChannel.modelsPath || '',
+                        responsePath: currentChannel.responsePath || currentChannel.endpoints?.responses || '',
+                        endpoints: currentChannel.endpoints || {},
+                        apiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
+                        openaiApiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
+                        experimental: currentChannel.experimental || {},
+                        ...resolveThinkingOptions(currentChannel)
                     }
                     currentClient = await LlmService.createClient(newClientOptions)
                 }
@@ -1141,11 +1159,14 @@ export class ChatAgent {
             while (retryCount <= maxRetries) {
                 try {
                     // 应用模型映射
-                    const currentChannel = modelIndex > 0 ? channelManager.getBestChannel(currentModel) : channel
                     const mapping = currentChannel
                         ? channelManager.getActualModel(currentChannel.id, currentModel)
                         : { actualModel: currentModel }
-                    const currentRequestOptions = { ...requestOptions, model: mapping.actualModel }
+                    const currentRequestOptions = {
+                        ...requestOptions,
+                        ...resolveThinkingOptions(currentChannel),
+                        model: mapping.actualModel
+                    }
                     response = await currentClient.sendMessage(userMessage, currentRequestOptions)
 
                     if (response?.contents?.length > 0 || response?.toolCallLogs?.length > 0) {

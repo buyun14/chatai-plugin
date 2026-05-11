@@ -977,7 +977,10 @@ export class AICommands extends plugin {
 ${dialogText}${truncatedNote}`
 
             // 获取群组独立的总结模型配置
-            const groupSummaryModel = await getGroupFeatureModel(e.group_id, 'summaryModel')
+            const groupSummaryModel = await getGroupFeatureModel(e.group_id, 'summaryModel', [
+                'features.groupSummary.model',
+                'llm.models.summary'
+            ])
             let summaryText = ''
             let result = null
             try {
@@ -1297,7 +1300,10 @@ ${dialogText}${truncatedNote}`
 
 ${dialogText}${truncatedNote}`
 
-            const groupSummaryModel = await getGroupFeatureModel(e.group_id, 'summaryModel')
+            const groupSummaryModel = await getGroupFeatureModel(e.group_id, 'summaryModel', [
+                'features.groupSummary.model',
+                'llm.models.summary'
+            ])
             let summaryText = ''
             let result = null
             try {
@@ -1411,9 +1417,12 @@ ${dialogText}${truncatedNote}`
                 return true
             }
 
-            // 获取模型信息
-            const modelName = config.get('llm.defaultModel') || '默认模型'
-            const shortModel = modelName.split('/').pop()
+            const portraitModel = await getGroupFeatureModel(groupId, 'profileModel', [
+                'features.userPortrait.model',
+                'llm.models.profile'
+            ])
+            const displayModel = portraitModel || config.get('llm.defaultModel') || '默认模型'
+            const shortModel = displayModel.split('/').pop()
 
             const portraitPrompt = `请根据以下用户的发言记录，分析并生成用户画像：
 
@@ -1444,6 +1453,7 @@ ${userMessages
                 userId: `portrait_${userId}`,
                 groupId: null, // 不传群ID，避免继承群人设
                 message: portraitPrompt,
+                model: portraitModel || undefined,
                 mode: 'chat',
                 skipHistory: true, // 跳过历史记录
                 disableTools: true, // 禁用工具
@@ -1746,9 +1756,12 @@ ${userMessages
                 config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories') || 100
             const userMessages = await getUserTextHistory(e, targetUserId, maxMessages)
 
-            // 获取模型信息
-            const modelName = config.get('llm.defaultModel') || '默认模型'
-            const shortModel = modelName.split('/').pop()
+            const profileModel = await getGroupFeatureModel(e.group_id, 'profileModel', [
+                'features.userPortrait.model',
+                'llm.models.profile'
+            ])
+            const displayModel = profileModel || config.get('llm.defaultModel') || '默认模型'
+            const shortModel = displayModel.split('/').pop()
 
             if (!userMessages || userMessages.length < 10) {
                 await this.reply(`${targetNickname} 的聊天记录太少（需要至少10条），无法生成画像`, true)
@@ -1806,6 +1819,7 @@ ${rawChatHistory}`
                 userId: `profile_${targetUserId}`,
                 groupId: null, // 不传群ID，避免继承群人设
                 message: aiPrompt,
+                model: profileModel || undefined,
                 mode: 'chat',
                 skipHistory: true, // 跳过历史记录
                 disableTools: true, // 禁用工具

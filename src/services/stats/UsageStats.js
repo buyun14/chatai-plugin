@@ -343,6 +343,23 @@ class UsageStats {
     }
 
     /**
+     * 获取指定天数内的使用统计
+     */
+    async getStats(days = 7) {
+        const safeDays = Math.max(1, Math.min(90, Number(days) || 7))
+        const since = Date.now() - safeDays * 24 * 60 * 60 * 1000
+        const records = await this.getRecent(MAX_RECORDS, { startTime: since })
+        return {
+            days: safeDays,
+            since,
+            ...this.calculateStats(records, `${safeDays}d`),
+            modelRanking: await this.getModelRanking(20),
+            channelRanking: await this.getChannelRanking(20),
+            recent: records.slice(0, 100)
+        }
+    }
+
+    /**
      * 获取今日统计
      */
     async getTodayStats() {

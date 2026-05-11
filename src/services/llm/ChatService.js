@@ -386,6 +386,7 @@ export class ChatService {
             if (scopeFeatures.dispatchModel) modelInfo.push(`调度=${scopeFeatures.dispatchModel}`)
             if (scopeFeatures.imageModel) modelInfo.push(`图像=${scopeFeatures.imageModel}`)
             if (scopeFeatures.searchModel) modelInfo.push(`搜索=${scopeFeatures.searchModel}`)
+            if (scopeFeatures.profileModel) modelInfo.push(`画像=${scopeFeatures.profileModel}`)
             const modelStr = modelInfo.length > 0 ? modelInfo.join(', ') : '默认'
             logger.info(`[ChatService] 作用域配置 [${scene}]: 预设=${scopePresetId || '默认'}, 模型分类=[${modelStr}]`)
         } catch (e) {
@@ -427,7 +428,7 @@ export class ChatService {
         }
 
         // 统一使用对话模型，同时处理上下文和工具调用
-        let llmModel = model || scopeFeatures.chatModel || LlmService.getModel()
+        let llmModel = model || scopeFeatures.chatModel || config.get('llm.models.chat') || LlmService.getModel()
         let actualEnableTools = allTools.length > 0
         let actualTools = allTools
         if (!model && currentPreset?.model && currentPreset.model.trim()) {
@@ -511,16 +512,23 @@ export class ChatService {
         const channelLlm = channelAdvanced.llm || {}
         const channelThinking = channelAdvanced.thinking || {}
         const channelStreaming = channelAdvanced.streaming || {}
-        const effectiveEnableReasoning =
-            config.get('thinking.enabled') !== false
-                ? (preset?.enableReasoning ?? channelThinking.enableReasoning)
-                : false
+        const resolveThinkingOptions = targetChannel => {
+            const thinking = targetChannel?.advanced?.thinking || {}
+            return {
+                enableReasoning:
+                    config.get('thinking.enabled') !== false
+                        ? (preset?.enableReasoning ?? thinking.enableReasoning)
+                        : false,
+                reasoningEffort: thinking.defaultLevel || 'low',
+                thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+            }
+        }
+        const thinkingOptions = resolveThinkingOptions(channel)
+        const effectiveEnableReasoning = thinkingOptions.enableReasoning
         const clientOptions = {
             enableTools: actualEnableTools,
             preSelectedTools: actualTools.length > 0 ? actualTools : null,
-            enableReasoning: effectiveEnableReasoning,
-            reasoningEffort: channelThinking.defaultLevel || 'low',
-            thinkingVendorControl: channelThinking.vendorThinkingControl ?? 'auto',
+            ...thinkingOptions,
             adapterType: adapterType,
             event,
             presetId: effectivePresetId,
@@ -919,9 +927,7 @@ export class ChatService {
             systemOverride: systemPrompt,
             stream: useStreaming,
             disableHistoryRead: skipHistory,
-            enableReasoning: effectiveEnableReasoning,
-            reasoningEffort: channelThinking.defaultLevel || 'low',
-            thinkingVendorControl: channelThinking.vendorThinkingControl ?? 'auto',
+            ...thinkingOptions,
             event,
             presetId: effectivePresetId,
             userPermission: event?.sender?.role || 'member',
@@ -1108,7 +1114,8 @@ export class ChatService {
                             apiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                             openaiApiInterface:
                                 currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
-                            experimental: currentChannel.experimental || {}
+                            experimental: currentChannel.experimental || {},
+                            ...resolveThinkingOptions(currentChannel)
                         }
                         currentClient = await LlmService.createClient(fallbackClientOptions)
 
@@ -1134,7 +1141,11 @@ export class ChatService {
                             const currentModelMapping = currentChannel
                                 ? channelManager.getActualModel(currentChannel.id, currentModel)
                                 : { actualModel: currentModel }
-                            const currentRequestOptions = { ...requestOptions, model: currentModelMapping.actualModel }
+                            const currentRequestOptions = {
+                                ...requestOptions,
+                                ...resolveThinkingOptions(currentChannel),
+                                model: currentModelMapping.actualModel
+                            }
                             response = await currentClient.sendMessage(userMessage, currentRequestOptions)
 
                             const hasToolCallLogs = response?.toolCallLogs?.length > 0
@@ -1254,7 +1265,8 @@ export class ChatService {
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         openaiApiInterface:
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
-                                        experimental: altChannel.experimental || {}
+                                        experimental: altChannel.experimental || {},
+                                        ...resolveThinkingOptions(altChannel)
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     emptyRetryCount = 0
@@ -1391,7 +1403,8 @@ export class ChatService {
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         openaiApiInterface:
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
-                                        experimental: altChannel.experimental || {}
+                                        experimental: altChannel.experimental || {},
+                                        ...resolveThinkingOptions(altChannel)
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     errorSwitched = true

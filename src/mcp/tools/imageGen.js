@@ -71,13 +71,36 @@ export const imageGenTools = [
                     type: 'boolean',
                     description: '是否自动发送生成的图片给用户，默认true',
                     default: true
+                },
+                size: {
+                    type: 'string',
+                    description: '图片尺寸，如 1024x1024、1024x1792、1792x1024。具体取值取决于所配置的API'
+                },
+                quality: {
+                    type: 'string',
+                    description: '图片质量，如 standard、hd、auto。具体取值取决于所配置的API'
+                },
+                style: {
+                    type: 'string',
+                    description: '图片风格，如 vivid、natural。具体取值取决于所配置的API'
+                },
+                n: {
+                    type: 'integer',
+                    description: '生成图片数量，默认由服务端配置决定',
+                    minimum: 1,
+                    maximum: 10
+                },
+                response_format: {
+                    type: 'string',
+                    enum: ['url', 'b64_json'],
+                    description: 'OpenAI Images API 响应格式'
                 }
             },
             required: ['prompt']
         },
         handler: async (args, ctx) => {
             try {
-                const { prompt, image_urls = [], auto_send = true } = args
+                const { prompt, image_urls = [], auto_send = true, size, quality, style, n, response_format } = args
                 const e = ctx?.getEvent?.()
                 const imageGen = await getImageGen()
                 injectEvent(imageGen, e)
@@ -94,7 +117,8 @@ export const imageGenTools = [
                 const result = await imageGen.generateImage({
                     prompt,
                     imageUrls: image_urls.slice(0, imageGen.maxImages),
-                    genType
+                    genType,
+                    options: { size, quality, style, n, response_format }
                 })
 
                 if (!result.success) {

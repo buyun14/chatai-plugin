@@ -3,8 +3,6 @@
  * 图片解析、语音处理、视频处理等
  */
 
-import fetch from 'node-fetch'
-
 export const mediaTools = [
     {
         name: 'parse_image',

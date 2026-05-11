@@ -92,6 +92,18 @@ class Config {
                     image: '',
                     // 伪人模型 - 用于模拟真人回复
                     roleplay: '',
+                    // 工具调度模型 - 用于工具组/意图分发
+                    dispatch: '',
+                    // 工具执行模型 - 用于工具相关调用
+                    tools: '',
+                    // 视觉模型 - 用于图像理解
+                    vision: '',
+                    // 搜索模型 - 用于联网搜索总结
+                    search: '',
+                    // 群聊总结模型
+                    summary: '',
+                    // 用户画像模型
+                    profile: '',
                     // 游戏模型 - 用于Galgame等互动游戏
                     game: ''
                 },
@@ -659,7 +671,7 @@ class Config {
                     defaultImage: '',
                     /* 图片访问基础URL（留空自动从 web.publicUrl 或本地地址获取） */
                     imageBaseUrl: '',
-                    // API列表（支持 text2imgModel/img2imgModel 独立模型、imageTransferMode: 'auto'|'base64'|'url'）
+                    // API列表（支持 apiFormat: auto/openai-chat/openai-images/gemini/stable-diffusion）
                     apis: [{ baseUrl: 'https://business.928100.xyz/v1/chat/completions', apiKey: 'X-Free' }],
                     // 预设来源配置
                     presetSources: [{ name: '云端预设', url: 'https://ht.pippi.top/data.json', enabled: true }],

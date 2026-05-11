@@ -185,7 +185,9 @@ export class GroupSummaryCore {
 
 ${dialogText}`
 
-        const groupSummaryModel = options.model || (await getGroupFeatureModel(groupId, 'summaryModel'))
+        const groupSummaryModel =
+            options.model ||
+            (await getGroupFeatureModel(groupId, 'summaryModel', ['features.groupSummary.model', 'llm.models.summary']))
 
         const result = await chatService.sendMessage({
             userId: `summary_${groupId}`,

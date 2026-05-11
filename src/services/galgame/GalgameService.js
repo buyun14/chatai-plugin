@@ -1382,7 +1382,7 @@ class GalgameService {
         // 检查事件是否已触发过
         let eventInfo = null
         if (parsed.event) {
-            const alreadyTriggered = await this.isEventTriggered(userId, characterId, parsed.event.name)
+            const alreadyTriggered = await this.isEventTriggered(userId, characterId, parsed.event.name, groupId)
             if (alreadyTriggered) {
                 gameLogger.debug(`事件 "${parsed.event.name}" 已触发过，忽略`)
             } else {

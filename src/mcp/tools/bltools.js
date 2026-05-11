@@ -1,4 +1,3 @@
-import fetch from 'node-fetch'
 import crypto from 'crypto'
 import config from '../../../config/config.js'
 

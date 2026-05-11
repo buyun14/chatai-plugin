@@ -19,11 +19,16 @@ if (!fs.existsSync(PRESET_CACHE_DIR)) {
     fs.mkdirSync(PRESET_CACHE_DIR, { recursive: true })
 }
 
+async function getFetch() {
+    if (typeof fetch === 'function') return fetch
+    return (await import('node-fetch')).default
+}
+
 // 从URL获取远程预设
 async function fetchRemotePresets(url) {
     try {
-        const fetch = (await import('node-fetch')).default
-        const response = await fetch(url, { timeout: 10000 })
+        const fetchFn = await getFetch()
+        const response = await fetchFn(url, { signal: AbortSignal.timeout(10000) })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return await response.json()
     } catch (error) {
@@ -324,8 +329,22 @@ router.post('/generate', async (req, res) => {
         const { prompt, options } = req.body
         if (!prompt) return res.status(400).json(ChaiteResponse.fail(null, 'prompt is required'))
 
-        // 图像生成需要通过渠道API实现
-        res.status(501).json(ChaiteResponse.fail(null, '图像生成功能需要配置渠道API'))
+        const { ImageGen } = await import('../../../apps/ImageGen.js')
+        const imageGen = new ImageGen()
+        imageGen.e = { isGroup: false, reply: async () => {} }
+        const imageUrls = Array.isArray(options?.imageUrls)
+            ? options.imageUrls
+            : Array.isArray(options?.image_urls)
+              ? options.image_urls
+              : []
+        const result = await imageGen.generateImage({
+            prompt,
+            imageUrls,
+            genType: imageUrls.length > 0 ? 'img2img' : 'text2img',
+            options: options || {}
+        })
+        if (!result.success) return res.status(502).json(ChaiteResponse.fail(null, result.error || '图片生成失败'))
+        res.json(ChaiteResponse.ok(result))
     } catch (error) {
         res.status(500).json(ChaiteResponse.fail(null, error.message))
     }
@@ -563,12 +582,13 @@ export function getImageBaseUrl() {
 
     /* 其次使用 web.publicUrl */
     const publicUrl = config.get('web.publicUrl')
-    if (publicUrl) return `${publicUrl.replace(/\/$/, '')}/chatai`
+    const mountPath = config.get('web.mountPath') || '/chatai'
+    if (publicUrl) return `${publicUrl.replace(/\/$/, '')}${mountPath}`
 
     /* 最后尝试从 WebServer 获取本地地址 */
     try {
         const port = config.get('web.port') || 3000
-        return `http://127.0.0.1:${port}/chatai`
+        return `http://127.0.0.1:${port}${mountPath}`
     } catch {
         return null
     }

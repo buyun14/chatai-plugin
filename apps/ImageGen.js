@@ -1141,6 +1141,15 @@ export class ImageGen extends plugin {
                         priority: api.priority ?? idx,
                         models: api.models || [],
                         imageTransferMode: api.imageTransferMode || 'auto',
+                        apiFormat: api.apiFormat || api.format || 'auto',
+                        size: api.size || '1024x1024',
+                        quality: api.quality || '',
+                        style: api.style || '',
+                        responseFormat: api.responseFormat || api.response_format || 'url',
+                        n: api.n || 1,
+                        steps: api.steps,
+                        width: api.width,
+                        height: api.height,
                         enabled: true
                     }
                 })
@@ -1162,6 +1171,15 @@ export class ImageGen extends plugin {
                     priority: 0,
                     models: [],
                     imageTransferMode: apiConfig.imageTransferMode || 'auto',
+                    apiFormat: apiConfig.apiFormat || apiConfig.format || 'openai-chat',
+                    size: apiConfig.size || '1024x1024',
+                    quality: apiConfig.quality || '',
+                    style: apiConfig.style || '',
+                    responseFormat: apiConfig.responseFormat || apiConfig.response_format || 'url',
+                    n: apiConfig.n || 1,
+                    steps: apiConfig.steps,
+                    width: apiConfig.width,
+                    height: apiConfig.height,
                     enabled: true
                 }
             ]
@@ -1190,7 +1208,16 @@ export class ImageGen extends plugin {
             method: api.method,
             stream: api.stream,
             name: api.name,
-            imageTransferMode: api.imageTransferMode
+            imageTransferMode: api.imageTransferMode,
+            apiFormat: api.apiFormat,
+            size: api.size,
+            quality: api.quality,
+            style: api.style,
+            responseFormat: api.responseFormat,
+            n: api.n,
+            steps: api.steps,
+            width: api.width,
+            height: api.height
         }
     }
 
@@ -1215,6 +1242,7 @@ export class ImageGen extends plugin {
     async callGenApi({
         prompt,
         imageUrls = [],
+        requestOptions = {},
         getApiConfig,
         extractResult,
         maxEmptyRetries = 2,
@@ -1298,27 +1326,20 @@ export class ImageGen extends plugin {
                         }
 
                         const currentUrls = await getUrlsForApi(apiConf)
-                        const content = []
-                        if (prompt) content.push({ type: 'text', text: prompt })
-                        if (currentUrls.length) {
-                            content.push(...currentUrls.map(url => ({ type: 'image_url', image_url: { url } })))
-                        }
+                        const payload = this.buildImagePayload({ ...apiConf, ...requestOptions }, prompt, currentUrls)
 
                         const isStream = apiConf.stream || false
                         const method = apiConf.method || 'POST'
                         const headers = { 'Content-Type': 'application/json' }
-                        if (currentKey) headers['Authorization'] = `Bearer ${currentKey}`
+                        const authFormat = (payload._authFormat || apiConf.apiFormat || '').toLowerCase()
+                        delete payload._authFormat
+                        if (currentKey) {
+                            if (authFormat === 'gemini') headers['x-goog-api-key'] = currentKey
+                            else headers['Authorization'] = `Bearer ${currentKey}`
+                        }
 
                         const fetchOptions = { method, headers, signal: AbortSignal.timeout(this.timeout) }
-                        /* GET 请求不携带 body */
-                        if (method !== 'GET') {
-                            fetchOptions.body = JSON.stringify({
-                                model: apiConf.model,
-                                messages: [{ role: 'user', content }],
-                                stream: isStream,
-                                temperature: 0.7
-                            })
-                        }
+                        if (method !== 'GET') fetchOptions.body = JSON.stringify(payload)
 
                         const response = await fetch(apiConf.apiUrl, fetchOptions)
 
@@ -1412,13 +1433,97 @@ export class ImageGen extends plugin {
     }
 
     /**
+     * 构建图片生成请求体
+     */
+    buildImagePayload(apiConf, prompt, imageUrls = []) {
+        const configuredFormat = apiConf.apiFormat || apiConf.format
+        const format =
+            configuredFormat && configuredFormat !== 'auto' ? configuredFormat : this.detectImageApiFormat(apiConf)
+        const size = apiConf.size || '1024x1024'
+        const responseFormat = apiConf.responseFormat || apiConf.response_format || 'url'
+
+        if (format === 'openai-images') {
+            const payload = {
+                model: apiConf.model,
+                prompt,
+                n: apiConf.n || 1,
+                size,
+                response_format: responseFormat
+            }
+            if (apiConf.quality) payload.quality = apiConf.quality
+            if (apiConf.style) payload.style = apiConf.style
+            return payload
+        }
+
+        if (format === 'stable-diffusion') {
+            const payload = {
+                text_prompts: [{ text: prompt || '' }],
+                samples: apiConf.n || apiConf.samples || 1
+            }
+            if (imageUrls[0]) payload.init_image = imageUrls[0]
+            if (apiConf.cfgScale || apiConf.cfg_scale) payload.cfg_scale = apiConf.cfgScale || apiConf.cfg_scale
+            if (apiConf.steps) payload.steps = apiConf.steps
+            if (apiConf.width) payload.width = apiConf.width
+            if (apiConf.height) payload.height = apiConf.height
+            return payload
+        }
+
+        if (format === 'gemini') {
+            const parts = []
+            if (prompt) parts.push({ text: prompt })
+            for (const url of imageUrls) {
+                if (url.startsWith('data:image')) {
+                    const [mimePart, data] = url.split(';base64,')
+                    parts.push({ inline_data: { mime_type: mimePart.replace('data:', '') || 'image/png', data } })
+                } else if (url.startsWith('base64://')) {
+                    parts.push({ inline_data: { mime_type: 'image/png', data: url.replace('base64://', '') } })
+                } else {
+                    parts.push({ file_data: { file_uri: url } })
+                }
+            }
+            return { contents: [{ role: 'user', parts }], _authFormat: 'gemini' }
+        }
+
+        const content = []
+        if (prompt) content.push({ type: 'text', text: prompt })
+        if (imageUrls.length) content.push(...imageUrls.map(url => ({ type: 'image_url', image_url: { url } })))
+
+        return {
+            model: apiConf.model,
+            messages: [{ role: 'user', content }],
+            stream: apiConf.stream || false,
+            temperature: apiConf.temperature ?? 0.7
+        }
+    }
+
+    detectImageApiFormat(apiConf) {
+        const path = apiConf.apiUrl || ''
+        if (/\/images\/generations\/?$/i.test(path)) return 'openai-images'
+        if (/\/v1\/generation\//i.test(path) || /stable-diffusion|stability/i.test(path)) return 'stable-diffusion'
+        return 'openai-chat'
+    }
+
+    normalizeImageData(value, images) {
+        if (!value || typeof value !== 'string') return
+        if (value.startsWith('data:image')) {
+            images.push(value.replace(/^data:image\/\w+;base64,/, 'base64://'))
+            return
+        }
+        if (/^[A-Za-z0-9+/=]+$/.test(value) && value.length > 200) {
+            images.push(`base64://${value}`)
+            return
+        }
+        if (/^https?:\/\//i.test(value) || value.startsWith('base64://')) images.push(value)
+    }
+
+    /**
      * 调用图片生成 API
      * @param {Object} options
      * @param {string} options.prompt - 提示词
      * @param {string[]} options.imageUrls - 图片URL列表
      * @param {'text2img'|'img2img'|null} options.genType - 生成类型，用于选择独立模型
      */
-    async generateImage({ prompt, imageUrls = [], genType = null }) {
+    async generateImage({ prompt, imageUrls = [], genType = null, options = {} }) {
         /*
          * 获取模型覆盖配置（群组/全局特定类型模型）
          * 优先级：API自定义模型 > overrideModel > 全局通用模型（在 getApiList 中实现）
@@ -1442,6 +1547,7 @@ export class ImageGen extends plugin {
         const result = await this.callGenApi({
             prompt,
             imageUrls,
+            requestOptions: options,
             getApiConfig: idx => this.getImageApiConfig(idx, overrideModel, genType),
             extractResult: data => this.extractImages(data),
             maxEmptyRetries: 2,
@@ -1675,27 +1781,42 @@ export class ImageGen extends plugin {
      */
     extractImages(data) {
         const images = []
-        const msg = data?.choices?.[0]?.message
-        if (Array.isArray(msg?.content)) {
-            for (const item of msg.content) {
-                if (item?.type === 'image_url' && item?.image_url?.url) {
-                    images.push(item.image_url.url)
-                }
-            }
+
+        for (const item of data?.data || []) {
+            this.normalizeImageData(item?.url || item?.b64_json || item?.base64, images)
         }
-        if (!images.length && typeof msg?.content === 'string') {
-            const mdImageRegex = /!\[.*?\]\((.*?)\)/g
-            let match
-            while ((match = mdImageRegex.exec(msg.content)) !== null) {
-                let imgUrl = match[1]
-                if (imgUrl.startsWith('data:image')) {
-                    imgUrl = imgUrl.replace(/^data:image\/\w+;base64,/, 'base64://')
-                }
-                images.push(imgUrl)
+
+        for (const item of data?.artifacts || []) {
+            this.normalizeImageData(item?.base64 || item?.url, images)
+        }
+
+        for (const candidate of data?.candidates || []) {
+            for (const part of candidate?.content?.parts || []) {
+                this.normalizeImageData(
+                    part?.inline_data?.data || part?.inlineData?.data || part?.file_data?.file_uri,
+                    images
+                )
             }
         }
 
-        return images
+        const msg = data?.choices?.[0]?.message
+        if (Array.isArray(msg?.content)) {
+            for (const item of msg.content) {
+                this.normalizeImageData(
+                    item?.image_url?.url || item?.imageUrl?.url || item?.url || item?.b64_json || item?.base64,
+                    images
+                )
+            }
+        }
+        if (typeof msg?.content === 'string') {
+            const mdImageRegex = /!\[.*?\]\((.*?)\)/g
+            let match
+            while ((match = mdImageRegex.exec(msg.content)) !== null) {
+                this.normalizeImageData(match[1], images)
+            }
+        }
+
+        return [...new Set(images)]
     }
     /**
      * 获取绘图结果发送模式

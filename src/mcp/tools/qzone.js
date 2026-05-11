@@ -4,7 +4,6 @@
  * 兼容 icqq（直接读取 bot.cookies）和 NapCat/go-cqhttp（通过 get_cookies API）
  */
 
-import fetch from 'node-fetch'
 import { callOneBotApi, icqqFriend, icqqGroup } from './helpers.js'
 
 /**
