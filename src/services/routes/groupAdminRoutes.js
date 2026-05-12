@@ -14,6 +14,20 @@ import { groupSummaryPushService } from '../group/GroupSummaryPushService.js'
 
 const router = express.Router()
 
+function normalizeModels(models) {
+    if (Array.isArray(models))
+        return models
+            .map(String)
+            .map(m => m.trim())
+            .filter(Boolean)
+    if (typeof models === 'string')
+        return models
+            .split(',')
+            .map(m => m.trim())
+            .filter(Boolean)
+    return []
+}
+
 // 群管理员Token密钥
 let groupAdminSecret = null
 function getGroupAdminSecret() {
@@ -21,7 +35,11 @@ function getGroupAdminSecret() {
         groupAdminSecret = config.get('web.groupAdminSecret')
         if (!groupAdminSecret) {
             groupAdminSecret = crypto.randomUUID()
-            config.set('web.groupAdminSecret', groupAdminSecret)
+            try {
+                config.set('web.groupAdminSecret', groupAdminSecret)
+            } catch (error) {
+                chatLogger.debug('[GroupAdmin] 群管理Token密钥保存失败，将使用内存密钥:', error.message)
+            }
         }
     }
     return groupAdminSecret
@@ -282,10 +300,7 @@ router.get('/config', groupAdminAuth, async (req, res) => {
             if (Array.isArray(indChannels) && indChannels.length > 0) {
                 for (const ch of indChannels) {
                     if (!ch.enabled && ch.enabled !== undefined) continue
-                    const chModels = (ch.models || '')
-                        .split(',')
-                        .map(m => m.trim())
-                        .filter(Boolean)
+                    const chModels = normalizeModels(ch.models)
                     if (chModels.length > 0) {
                         channels.push({
                             id: ch.id || `group-ind-${channels.length}`,
@@ -454,6 +469,7 @@ router.get('/config', groupAdminAuth, async (req, res) => {
                             if (Array.isArray(channels)) {
                                 return channels.map(ch => ({
                                     ...ch,
+                                    models: normalizeModels(ch.models),
                                     apiKey: ch.apiKey ? '****' + ch.apiKey.slice(-4) : ''
                                 }))
                             }

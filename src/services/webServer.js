@@ -557,7 +557,7 @@ class WebServer {
         this.router.use('/api/images', publicImageRouter) // 公开图片访问，无需认证
         this.router.use('/api/stats', auth, statsRoutes)
         this.router.use('/mcp', mcpServerRoutes) // MCP Server 暴露端点，使用独立 apiKey 鉴权
-        this.router.use('/api/group-admin', auth, groupAdminRoutes)
+        this.router.use('/api/group-admin', groupAdminRoutes)
         this.router.use('/api/skills', auth, skillsRoutes)
         // 游戏编辑路由必须在通用/api路由之前注册，避免被auth中间件拦截
         this.router.use('/api/game-edit', createGameEditRoutes()) // 无需认证，使用UUID访问
