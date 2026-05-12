@@ -10,6 +10,7 @@ import { redisClient } from '../../core/cache/RedisClient.js'
 import config from '../../../config/config.js'
 import historyManager from '../../core/utils/history.js'
 import { databaseService } from '../storage/DatabaseService.js'
+import { MessageApi } from '../../utils/messageParser.js'
 
 /**
  * @class ContextManager
@@ -977,13 +978,13 @@ ${dialogText}
             }
 
             let chats = processChats(initialChats)
-            let seq = initialChats[0]?.seq || initialChats[0]?.message_seq || initialChats[0]?.message_id
+            let seq = Number(initialChats[0]?.seq || initialChats[0]?.message_seq || 0)
 
             // 继续获取更多消息直到达到数量
             while (chats.length < num && seq) {
                 try {
                     const chatHistory = await group.getChatHistory(seq, 20)
-                    const newSeq = chatHistory[0]?.seq || chatHistory[0]?.message_seq || chatHistory[0]?.message_id
+                    const newSeq = Number(chatHistory[0]?.seq || chatHistory[0]?.message_seq || 0)
 
                     if (!chatHistory || chatHistory.length === 0 || seq === newSeq) {
                         break
@@ -1060,11 +1061,12 @@ ${dialogText}
         // 处理引用消息
         const replyPart = chat.message?.find(msg => msg.type === 'reply')
         if (replyPart) {
-            const replyId = replyPart.id || replyPart.data?.id
-            if (replyId) {
+            const replySeq = replyPart.seq || replyPart.data?.seq
+            if (replySeq) {
                 try {
-                    const originalMsgArray = await group.getChatHistory(replyId, 1)
-                    const originalMsg = originalMsgArray?.[0]
+                    const originalMsgArray = await group.getChatHistory(Number(replySeq), 1)
+                    const originalMsg =
+                        originalMsgArray?.find?.(msg => Number(msg.seq) === Number(replySeq)) || originalMsgArray?.[0]
                     if (originalMsg?.sender) {
                         const originalSenderId = originalMsg.sender.user_id
                         let originalSenderName =
@@ -1296,30 +1298,39 @@ ${dialogText}
 
         const bot = e.bot || global.Bot
         const getMessage = async (messageId, seq) => {
-            try {
-                if (bot?.getMsg && messageId) {
+            const apiMsg = await MessageApi.getMsg(e, messageId || seq, { useSeq: !messageId, seq })
+            if (apiMsg) return apiMsg.data || apiMsg
+            if (bot?.getMsg && messageId) {
+                try {
                     const msg = await bot.getMsg(messageId)
                     if (msg) return msg.data || msg
+                } catch (err) {
+                    logger.debug(`[ContextManager] bot.getMsg失败: ${err.message}`)
                 }
-                if (bot?.sendApi && messageId) {
+            }
+            if (bot?.sendApi && messageId) {
+                try {
                     const result = await bot.sendApi('get_msg', { message_id: messageId })
                     if (result) return result.data || result
+                } catch (err) {
+                    logger.debug(`[ContextManager] sendApi.get_msg失败: ${err.message}`)
                 }
-                if (e.group?.getChatHistory && (seq || messageId)) {
-                    const history = await e.group.getChatHistory(seq || messageId, 1)
-                    if (history?.[0]) return history[0]
+            }
+            if (e.group?.getChatHistory && seq) {
+                try {
+                    const history = await e.group.getChatHistory(Number(seq), 20)
+                    const found = history?.find?.(m => Number(m.seq) === Number(seq))
+                    if (found || history?.length) return found || history[history.length - 1]
+                } catch (err) {
+                    logger.debug(`[ContextManager] group.getChatHistory失败: ${err.message}`)
                 }
-                if (e.getReply && typeof e.getReply === 'function') {
+            }
+            if (e.getReply && typeof e.getReply === 'function') {
+                try {
                     return await e.getReply()
+                } catch (err) {
+                    logger.debug(`[ContextManager] e.getReply失败: ${err.message}`)
                 }
-                if (bot?.pickGroup && e.group_id && seq) {
-                    const group = bot.pickGroup(e.group_id)
-                    if (group?.getMsg) {
-                        return await group.getMsg(seq)
-                    }
-                }
-            } catch (err) {
-                logger.debug(`[ContextManager] 获取消息失败: ${err.message}`)
             }
             return null
         }

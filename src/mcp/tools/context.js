@@ -3,6 +3,8 @@
  * 对话上下文、群聊上下文等
  */
 
+import { MessageApi } from '../../utils/messageParser.js'
+
 export const contextTools = [
     {
         name: 'get_current_context',
@@ -170,26 +172,31 @@ export const contextTools = [
                  * 获取单条消息
                  */
                 const getMessage = async (messageId, seq) => {
-                    try {
-                        // 方法1: bot.getMsg
-                        if (bot?.getMsg && messageId) {
+                    const apiMsg = await MessageApi.getMsg(e, messageId || seq, { useSeq: !messageId, seq })
+                    if (apiMsg) return apiMsg
+                    if (bot?.getMsg && messageId) {
+                        try {
                             return await bot.getMsg(messageId)
-                        }
-                        // 方法2: bot.sendApi
-                        if (bot?.sendApi && messageId) {
+                        } catch {}
+                    }
+                    if (bot?.sendApi && messageId) {
+                        try {
                             const result = await bot.sendApi('get_msg', { message_id: messageId })
-                            return result?.data || result
-                        }
-                        // 方法3: group.getChatHistory
-                        if (e.group?.getChatHistory && seq) {
-                            const history = await e.group.getChatHistory(seq, 1)
-                            return history?.[0]
-                        }
-                        // 方法4: e.getReply
-                        if (e.getReply && typeof e.getReply === 'function') {
+                            if (result) return result?.data || result
+                        } catch {}
+                    }
+                    if (e.group?.getChatHistory && seq) {
+                        try {
+                            const history = await e.group.getChatHistory(seq, 20)
+                            const found = history?.find?.(m => Number(m.seq) === Number(seq))
+                            if (found || history?.length) return found || history[history.length - 1]
+                        } catch {}
+                    }
+                    if (e.getReply && typeof e.getReply === 'function') {
+                        try {
                             return await e.getReply()
-                        }
-                    } catch {}
+                        } catch {}
+                    }
                     return null
                 }
 

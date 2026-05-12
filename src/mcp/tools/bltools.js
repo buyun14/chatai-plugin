@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import config from '../../../config/config.js'
+import { segment } from '../../utils/messageParser.js'
 
 export const bltoolsTools = [
     {

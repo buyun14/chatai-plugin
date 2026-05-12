@@ -3,24 +3,7 @@
  * 支持 NapCat 和 icqq 的 Bot 信息 API
  * 参考: https://napcat.apifox.cn/226656952e0
  */
-async function callOneBotApi(bot, action, params = {}) {
-    if (bot.sendApi) {
-        return await bot.sendApi(action, params)
-    }
-    if (bot[action]) {
-        return await bot[action](params)
-    }
-    if (bot.config?.baseUrl || bot.adapter?.config?.baseUrl) {
-        const baseUrl = bot.config?.baseUrl || bot.adapter?.config?.baseUrl
-        const res = await fetch(`${baseUrl}/${action}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(params)
-        })
-        return await res.json()
-    }
-    throw new Error('不支持的协议类型')
-}
+import { callOneBotApi } from '../../utils/eventAdapter.js'
 
 export const botTools = [
     {

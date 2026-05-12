@@ -12,6 +12,38 @@ import { checkAccessList, sendForwardMsg } from '../src/utils/platformAdapter.js
 import { statsService } from '../src/services/stats/StatsService.js'
 import { emojiThiefService } from './EmojiThief.js'
 
+async function getBymGroupContextMessages(e, groupId, limit = 15) {
+    const group = e.group || e.bot?.pickGroup?.(Number(groupId))
+    if (group && typeof group.getChatHistory === 'function') {
+        try {
+            const history = await group.getChatHistory(Number(e.seq) || 0, Math.min(limit + 1, 20))
+            const messages = (history || [])
+                .filter(msg => String(msg.message_id || '') !== String(e.message_id || ''))
+                .map(msg => {
+                    const content = (msg.message || [])
+                        .filter(part => part.type === 'text')
+                        .map(part => part.text || '')
+                        .join('')
+                    return {
+                        nickname: msg.sender?.card || msg.sender?.nickname || msg.sender?.user_id || '用户',
+                        userId: msg.sender?.user_id,
+                        content,
+                        timestamp: msg.time ? msg.time * 1000 : Date.now()
+                    }
+                })
+                .filter(msg => msg.content && msg.content.trim())
+                .slice(-limit)
+            if (messages.length > 0) return messages
+        } catch (err) {
+            logger.debug('[BYM] Bot API 获取群聊上下文失败:', err.message)
+        }
+    }
+
+    const { memoryManager } = await import('../src/services/storage/MemoryManager.js')
+    await memoryManager.init()
+    return (memoryManager.getGroupMessageBuffer(groupId) || []).slice(-limit)
+}
+
 /**
  * 伪人模式 (BYM - Be Yourself Mode)
  * 让Bot像真人一样随机回复消息
@@ -415,12 +447,9 @@ export class bym extends plugin {
             const fullUserId = bymGroupId ? `bym_group_${bymGroupId}` : bymUserId
             if (bymGroupId) {
                 try {
-                    const { memoryManager } = await import('../src/services/storage/MemoryManager.js')
-                    await memoryManager.init()
-                    const recentMessages = memoryManager.getGroupMessageBuffer(bymGroupId) || []
+                    const contextMessages = await getBymGroupContextMessages(e, bymGroupId, 15)
 
-                    if (recentMessages.length > 0) {
-                        const contextMessages = recentMessages.slice(-15)
+                    if (contextMessages.length > 0) {
                         const contextText = contextMessages
                             .map(m => {
                                 const name = m.nickname || m.userId || '用户'

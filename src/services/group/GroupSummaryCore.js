@@ -24,7 +24,6 @@ export class GroupSummaryCore {
         let messages = []
         let dataSource = ''
 
-        // 1. 通过 Bot API 获取
         if (bot) {
             try {
                 const group = bot.pickGroup?.(parseInt(groupId))
@@ -38,9 +37,9 @@ export class GroupSummaryCore {
                         const chatHistory = await group.getChatHistory(seq, 20)
                         if (!chatHistory || chatHistory.length === 0) break
                         totalScanned += chatHistory.length
-                        const oldestSeq = chatHistory[0]?.seq || chatHistory[0]?.message_id
-                        if (seq === oldestSeq) break
-                        seq = oldestSeq
+                        const oldestSeq = Number(chatHistory[0]?.seq) || 0
+                        if (seq && oldestSeq && seq === oldestSeq) break
+                        if (oldestSeq) seq = oldestSeq
                         const filteredChats = chatHistory.filter(chat => {
                             if (!chat.message || chat.message.length === 0) return false
                             return chat.message.some(part => part.type === 'text' || part.type === 'at')
@@ -48,6 +47,7 @@ export class GroupSummaryCore {
                         if (filteredChats.length > 0) {
                             allChats.unshift(...filteredChats.reverse())
                         }
+                        if (!oldestSeq) break
                     }
                     const history = allChats.slice(-maxMessages)
                     if (history.length > 0) {
@@ -77,12 +77,11 @@ export class GroupSummaryCore {
             }
         }
 
-        // 2. 内存缓冲
-        if (messages.length < maxMessages) {
+        if (messages.length === 0) {
             try {
                 await memoryManager.init()
                 const memoryMessages = memoryManager.getGroupMessageBuffer(groupId) || []
-                if (memoryMessages.length > messages.length) {
+                if (memoryMessages.length > 0) {
                     messages = memoryMessages
                     dataSource = '内存缓冲'
                 }
@@ -91,34 +90,35 @@ export class GroupSummaryCore {
             }
         }
 
-        // 3. 数据库
-        try {
-            databaseService.init()
-            const conversationId = `group_summary_${groupId}`
-            const rawDbMessages = databaseService.getMessages(conversationId, maxMessages)
-            if (rawDbMessages && rawDbMessages.length > messages.length) {
-                const dbMessages = rawDbMessages
-                    .map(m => ({
-                        nickname: m.metadata?.nickname || '用户',
-                        content:
-                            typeof m.content === 'string'
-                                ? m.content
-                                : Array.isArray(m.content)
-                                  ? m.content
-                                        .filter(c => c.type === 'text')
-                                        .map(c => c.text)
-                                        .join('')
-                                  : String(m.content),
-                        timestamp: m.timestamp
-                    }))
-                    .filter(m => m.content && m.content.trim())
-                if (dbMessages.length > messages.length) {
-                    messages = dbMessages
-                    dataSource = '数据库'
+        if (messages.length === 0) {
+            try {
+                databaseService.init()
+                const conversationId = `group_summary_${groupId}`
+                const rawDbMessages = databaseService.getMessages(conversationId, maxMessages)
+                if (rawDbMessages && rawDbMessages.length > 0) {
+                    const dbMessages = rawDbMessages
+                        .map(m => ({
+                            nickname: m.metadata?.nickname || '用户',
+                            content:
+                                typeof m.content === 'string'
+                                    ? m.content
+                                    : Array.isArray(m.content)
+                                      ? m.content
+                                            .filter(c => c.type === 'text')
+                                            .map(c => c.text)
+                                            .join('')
+                                      : String(m.content),
+                            timestamp: m.timestamp
+                        }))
+                        .filter(m => m.content && m.content.trim())
+                    if (dbMessages.length > 0) {
+                        messages = dbMessages
+                        dataSource = '数据库'
+                    }
                 }
+            } catch (dbErr) {
+                logger.debug(`[GroupSummaryCore] 从数据库读取群 ${groupId} 消息失败:`, dbErr.message)
             }
-        } catch (dbErr) {
-            logger.debug(`[GroupSummaryCore] 从数据库读取群 ${groupId} 消息失败:`, dbErr.message)
         }
 
         return { messages, dataSource }

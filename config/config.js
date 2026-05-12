@@ -591,7 +591,7 @@ class Config {
                 },
                 userPortrait: {
                     enabled: true, // 个人画像分析
-                    minMessages: 10 // 最少需要N条消息才能分析
+                    minMessages: 100 // 期望拉取的消息数量；实际超过20条有效发言即可分析
                 },
                 // 戳一戳响应（默认关闭，需在面板开启）
                 poke: {

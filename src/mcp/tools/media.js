@@ -3,6 +3,8 @@
  * 图片解析、语音处理、视频处理等
  */
 
+import { segment } from '../../utils/messageParser.js'
+
 export const mediaTools = [
     {
         name: 'parse_image',

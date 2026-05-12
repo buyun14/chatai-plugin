@@ -28,8 +28,184 @@ import {
     IcqqMessageUtils,
     ProtobufUtils,
     NapCatMessageUtils,
-    MsgRecordExtractor
+    MsgRecordExtractor,
+    MessageApi,
+    segment
 } from '../../utils/messageParser.js'
+
+function parseProtocolBody(data, encoding = 'auto') {
+    if (Buffer.isBuffer(data)) return data
+    if (data && typeof data === 'object') return data
+    if (typeof data !== 'string') return data
+
+    const text = data.trim()
+    if (!text) return Buffer.alloc(0)
+
+    if (encoding === 'json' || (encoding === 'auto' && /^[{[]/.test(text))) {
+        return JSON.parse(text)
+    }
+    if (encoding === 'hex') return Buffer.from(text.replace(/\s+/g, ''), 'hex')
+    if (encoding === 'text' || encoding === 'utf8') return Buffer.from(text)
+    return Buffer.from(text, 'base64')
+}
+
+function encodeProtocolBody(body, shouldEncode) {
+    if (!shouldEncode || Buffer.isBuffer(body) || body instanceof Uint8Array) return body
+    if (!body || typeof body !== 'object') return body
+    return ProtobufUtils.encode(body) || body
+}
+
+function toPacketBuffer(body) {
+    if (Buffer.isBuffer(body)) return body
+    if (body instanceof Uint8Array) return Buffer.from(body)
+    if (body && typeof body === 'object') {
+        const encoded = ProtobufUtils.encode(body)
+        if (encoded) return Buffer.from(encoded)
+        return Buffer.from(JSON.stringify(body))
+    }
+    if (typeof body === 'string') return Buffer.from(body)
+    return Buffer.alloc(0)
+}
+
+function formatProtocolResponse(response, decodeResponse = false) {
+    if (Buffer.isBuffer(response) || response instanceof Uint8Array) {
+        const buffer = Buffer.from(response)
+        const result = { base64: buffer.toString('base64'), hex: buffer.toString('hex') }
+        if (decodeResponse) {
+            const decoded = ProtobufUtils.decode(buffer)
+            if (decoded) result.decoded = decoded?.toJSON?.() || decoded
+        }
+        return result
+    }
+    return response?.toJSON?.() || response || null
+}
+
+function getPacketBuildOptions(args) {
+    const build = args.build && typeof args.build === 'object' ? { ...args.build } : {}
+    build.cmd = build.cmd || args.cmd || args.pb_type
+    build.type = Number(build.type ?? args.packet_type ?? 0xb)
+    build.encrypt = Number(build.encrypt ?? args.encrypt ?? 0x1)
+    if (args.extra) build.extra = args.extra
+    return build
+}
+
+async function sendToolMessage(bot, { groupId, userId, message, event }) {
+    if (!bot && event?.reply) return await event.reply(message)
+    if (groupId) {
+        const gid = parseInt(groupId)
+        if (typeof bot?.sendApi === 'function') return await bot.sendApi('send_group_msg', { group_id: gid, message })
+        if (typeof bot?.sendGroupMsg === 'function') return await bot.sendGroupMsg(gid, message)
+        const group = bot?.pickGroup?.(gid)
+        if (typeof group?.sendMsg === 'function') return await group.sendMsg(message)
+    }
+    if (userId) {
+        const uid = parseInt(userId)
+        if (typeof bot?.sendApi === 'function') return await bot.sendApi('send_private_msg', { user_id: uid, message })
+        if (typeof bot?.sendPrivateMsg === 'function') return await bot.sendPrivateMsg(uid, message)
+        const friend = bot?.pickFriend?.(uid) || bot?.pickUser?.(uid)
+        if (typeof friend?.sendMsg === 'function') return await friend.sendMsg(message)
+    }
+    if (event?.reply) return await event.reply(message)
+    throw new Error('无法确定发送目标或当前协议端不支持发送消息')
+}
+
+async function handleProtocolPacket(args, ctx) {
+    const e = ctx.getEvent?.()
+    const bot = e?.bot || ctx.getBot?.() || global.Bot
+    if (!bot) return { success: false, error: '无法获取Bot实例' }
+
+    const result = await sendProtocolPacket(bot, args)
+    return {
+        ...result,
+        available_methods: {
+            sendOidbSvcTrpcTcp: typeof bot.sendOidbSvcTrpcTcp === 'function',
+            sendOidb: typeof bot.sendOidb === 'function',
+            sendUni: typeof bot.sendUni === 'function',
+            writeUni: typeof bot.writeUni === 'function',
+            sendPacket: typeof bot.sendPacket === 'function',
+            sendMergeUni: typeof bot.sendMergeUni === 'function',
+            sendApi: typeof bot.sendApi === 'function'
+        }
+    }
+}
+
+async function sendProtocolPacket(bot, args) {
+    const cmd = args.cmd || args.pb_type || args.action
+    const method = args.method || (Array.isArray(args.packets) ? 'send_merge_uni' : 'auto')
+    const timeout = Number(args.timeout ?? 6)
+    const extra = args.extra && typeof args.extra === 'object' ? args.extra : undefined
+    const isOidbCmd = typeof cmd === 'string' && /^(OidbSvc|oidb_)/i.test(cmd)
+    const isTrpcOidbCmd = typeof cmd === 'string' && /^OidbSvcTrpcTcp\./i.test(cmd)
+    let body = parseProtocolBody(args.body ?? args.pb_data ?? args.data ?? '', args.body_encoding || 'auto')
+    body = encodeProtocolBody(body, args.encode_json !== false)
+
+    const sendAndReturn = async (usedMethod, fn) => {
+        const response = await fn()
+        return {
+            success: true,
+            method: usedMethod,
+            cmd,
+            response: formatProtocolResponse(response, args.decode_response !== false)
+        }
+    }
+
+    if (
+        (method === 'auto' || method === 'send_oidb_svc_trpc_tcp') &&
+        typeof bot.sendOidbSvcTrpcTcp === 'function' &&
+        (isTrpcOidbCmd || method === 'send_oidb_svc_trpc_tcp')
+    ) {
+        return await sendAndReturn('sendOidbSvcTrpcTcp', () => bot.sendOidbSvcTrpcTcp(cmd, body, extra))
+    }
+    if (
+        (method === 'auto' || method === 'send_oidb') &&
+        typeof bot.sendOidb === 'function' &&
+        (isOidbCmd || method === 'send_oidb')
+    ) {
+        return await sendAndReturn('sendOidb', () => bot.sendOidb(cmd, body, timeout, extra))
+    }
+    if ((method === 'auto' || method === 'send_uni') && typeof bot.sendUni === 'function' && cmd) {
+        return await sendAndReturn('sendUni', () => bot.sendUni(cmd, toPacketBuffer(body), timeout, extra))
+    }
+    if ((method === 'write_uni' || method === 'write') && typeof bot.writeUni === 'function' && cmd) {
+        await bot.writeUni(cmd, toPacketBuffer(body), args.seq === undefined ? -1 : Number(args.seq), extra)
+        return { success: true, method: 'writeUni', cmd, response: null, note: '已发送，不等待响应' }
+    }
+    if (method === 'send_packet' && typeof bot.sendPacket === 'function') {
+        return await sendAndReturn('sendPacket', () =>
+            bot.sendPacket(
+                toPacketBuffer(body),
+                timeout,
+                args.seq === undefined ? -1 : Number(args.seq),
+                getPacketBuildOptions(args)
+            )
+        )
+    }
+    if ((method === 'send_merge_uni' || method === 'merge') && typeof bot.sendMergeUni === 'function') {
+        const packets = Array.isArray(args.packets)
+            ? args.packets
+            : [{ cmd, body, needResp: args.need_response !== false }]
+        const list = packets.map(packet => ({
+            cmd: packet.cmd || cmd,
+            body: toPacketBuffer(
+                parseProtocolBody(
+                    packet.body ?? packet.pb_data ?? body,
+                    packet.body_encoding || args.body_encoding || 'auto'
+                )
+            ),
+            seq: packet.seq,
+            needResp: packet.needResp ?? packet.need_response ?? true
+        }))
+        return await sendAndReturn('sendMergeUni', () => bot.sendMergeUni(list, timeout, extra))
+    }
+    if ((method === 'send_api' || method === 'onebot') && typeof bot.sendApi === 'function') {
+        const action = args.action || 'send_pb_msg'
+        return await sendAndReturn('sendApi', () =>
+            bot.sendApi(action, args.params || { cmd, pb_type: cmd, pb_data: args.pb_data })
+        )
+    }
+
+    throw new Error('当前 Bot 不支持指定的协议包发送方法')
+}
 
 export const messageTools = [
     {
@@ -920,47 +1096,90 @@ export const messageTools = [
             properties: {
                 group_id: { type: 'string', description: '群号（群聊时）' },
                 user_id: { type: 'string', description: '用户QQ号（私聊时）' },
-                count: { type: 'number', description: '获取数量，默认20' }
+                message_id: { type: 'string', description: '从指定 message_id 往前获取，icqq 会自动解析群/私聊目标' },
+                seq: { type: 'number', description: '群消息 seq，默认0表示最新消息往前' },
+                time: { type: 'number', description: '私聊时间戳，默认0表示最新消息往前' },
+                count: { type: 'number', description: '获取数量，默认20，icqq 非 NT 通常最多20' }
             }
         },
         handler: async (args, ctx) => {
             try {
-                const bot = ctx.getBot()
-                const e = ctx.getEvent()
-                const count = args.count || 20
+                const bot = ctx.getBot?.() || ctx.getEvent?.()?.bot || global.Bot
+                const e = ctx.getEvent?.()
+                if (!bot) return { success: false, error: '无法获取Bot实例' }
+                const count = Math.min(Math.max(Number(args.count || 20), 1), 50)
 
-                let target
+                let history = []
                 let isGroup = false
+                let source = 'unknown'
+                let targetId = null
 
-                if (args.group_id) {
-                    target = bot.pickGroup(parseInt(args.group_id))
+                if (args.message_id && typeof bot.getMsg === 'function') {
+                    const msg = await bot.getMsg(args.message_id)
+                    history = msg ? [msg.data || msg] : []
+                    source = 'bot.getMsg'
+                } else if (args.message_id && typeof bot.sendApi === 'function') {
+                    const result = await bot.sendApi('get_msg', { message_id: args.message_id })
+                    const msg = result?.data || result
+                    history = msg ? [msg] : []
+                    source = 'sendApi.get_msg'
+                } else if (args.group_id || e?.group_id) {
+                    targetId = parseInt(args.group_id || e.group_id)
                     isGroup = true
-                } else if (args.user_id) {
-                    target = bot.pickFriend(parseInt(args.user_id))
-                } else if (e?.group_id) {
-                    target = bot.pickGroup(e.group_id)
-                    isGroup = true
-                } else if (e?.user_id) {
-                    target = bot.pickFriend(e.user_id)
+                    if (bot.pickGroup) {
+                        const group = bot.pickGroup(targetId)
+                        if (typeof group?.getChatHistory === 'function') {
+                            history = (await group.getChatHistory(Number(args.seq || 0), count)) || []
+                            source = 'group.getChatHistory'
+                        }
+                    }
+                    if (!history.length && typeof bot.sendApi === 'function') {
+                        const result = await bot.sendApi('get_group_msg_history', {
+                            group_id: targetId,
+                            message_seq: args.seq,
+                            count
+                        })
+                        history = result?.data?.messages || result?.data || result?.messages || []
+                        source = 'sendApi.get_group_msg_history'
+                    }
+                } else if (args.user_id || e?.user_id) {
+                    targetId = parseInt(args.user_id || e.user_id)
+                    const user = bot.pickUser?.(targetId) || bot.pickFriend?.(targetId)
+                    if (typeof user?.getChatHistory === 'function') {
+                        history = (await user.getChatHistory(Number(args.time || 0), count)) || []
+                        source = 'user.getChatHistory'
+                    }
+                    if (!history.length && typeof bot.sendApi === 'function') {
+                        const result = await bot.sendApi('get_private_msg_history', {
+                            user_id: targetId,
+                            time: args.time,
+                            count
+                        })
+                        history = result?.data?.messages || result?.data || result?.messages || []
+                        source = 'sendApi.get_private_msg_history'
+                    }
                 } else {
-                    return { success: false, error: '需要指定 group_id 或 user_id' }
+                    return { success: false, error: '需要指定 group_id、user_id 或提供会话上下文' }
                 }
 
-                if (!target?.getChatHistory) {
-                    return { success: false, error: '无法获取聊天记录' }
-                }
-
-                const history = await target.getChatHistory(0, count)
-                const messages = (history || []).slice(-count).map(msg => ({
-                    time: msg.time,
-                    user_id: msg.sender?.user_id || msg.user_id,
-                    nickname: msg.sender?.nickname || msg.sender?.card || '',
-                    content: msg.raw_message || msg.message?.map(m => m.text || `[${m.type}]`).join('') || ''
-                }))
+                const messages = (Array.isArray(history) ? history : []).slice(-count).map(msg => {
+                    const data = msg.data || msg
+                    return {
+                        message_id: data.message_id || '',
+                        seq: data.seq || data.message_seq || 0,
+                        rand: data.rand || 0,
+                        time: data.time,
+                        user_id: data.sender?.user_id || data.user_id,
+                        nickname: data.sender?.nickname || data.sender?.card || data.nickname || '',
+                        content: data.raw_message || parseForwardContent(data.message || data.content || [])
+                    }
+                })
 
                 return {
                     success: true,
+                    source,
                     is_group: isGroup,
+                    target_id: targetId,
                     count: messages.length,
                     messages
                 }
@@ -2232,51 +2451,119 @@ export const messageTools = [
 
     {
         name: 'get_msg',
-        description: '获取消息详情（通过消息ID）',
+        description: '获取消息详情。支持 OneBot/NapCat message_id、icqq 群 seq、私聊时间戳，以及当前会话上下文回退。',
         inputSchema: {
             type: 'object',
             properties: {
-                message_id: { type: 'string', description: '消息ID' }
-            },
-            required: ['message_id']
+                message_id: { type: 'string', description: '消息ID；icqq 可传完整 message_id 或 seq/time' },
+                group_id: { type: 'string', description: '群号；配合 seq 获取群消息' },
+                user_id: { type: 'string', description: '用户QQ号；配合 time 获取私聊消息' },
+                seq: { type: 'number', description: 'icqq 群消息 seq' },
+                time: { type: 'number', description: 'icqq 私聊消息时间戳' },
+                count: { type: 'number', description: '历史记录回退查找条数，默认20' },
+                include_raw: { type: 'boolean', description: '是否返回原始消息对象' }
+            }
         },
         handler: async (args, ctx) => {
             try {
-                const e = ctx.getEvent()
-                const bot = e?.bot || global.Bot
+                const e = ctx.getEvent?.()
+                const bot = e?.bot || ctx.getBot?.() || global.Bot
+                if (!bot) return { success: false, error: '无法获取Bot实例' }
 
-                if (!bot) {
-                    return { success: false, error: '无法获取Bot实例' }
-                }
-
+                const messageId = args.message_id || e?.message_id
+                const groupId = args.group_id ? parseInt(args.group_id) : e?.group_id
+                const userId = args.user_id ? parseInt(args.user_id) : e?.user_id
+                const seq = args.seq ?? (messageId && /^\d+$/.test(String(messageId)) ? Number(messageId) : undefined)
+                const time = args.time ?? undefined
+                const count = Math.min(Math.max(Number(args.count || 20), 1), 50)
                 let msg = null
+                let source = 'unknown'
 
-                // NapCat / OneBot API
-                if (bot.getMsg) {
-                    msg = await bot.getMsg(args.message_id)
-                } else if (bot.get_msg) {
-                    msg = await bot.get_msg(args.message_id)
-                } else if (bot.sendApi) {
-                    const result = await bot.sendApi('get_msg', { message_id: args.message_id })
-                    msg = result?.data || result
+                if (messageId) {
+                    try {
+                        msg = await MessageApi.getMsg(
+                            e || { bot, group_id: groupId, user_id: userId, isGroup: !!groupId },
+                            messageId
+                        )
+                        if (msg) source = msg._source || 'MessageApi.getMsg'
+                    } catch {}
+                }
+                if (!msg && messageId && typeof bot.getMsg === 'function') {
+                    try {
+                        msg = await bot.getMsg(messageId)
+                        source = 'bot.getMsg'
+                    } catch {}
+                }
+                if (!msg && messageId && typeof bot.sendApi === 'function') {
+                    try {
+                        const result = await bot.sendApi('get_msg', { message_id: messageId })
+                        msg = result?.data || result
+                        source = 'sendApi.get_msg'
+                    } catch {}
+                }
+                if (!msg && groupId && bot.pickGroup) {
+                    try {
+                        const group = bot.pickGroup(parseInt(groupId))
+                        if (seq !== undefined && typeof group?.getChatHistory === 'function') {
+                            const history = await group.getChatHistory(Number(seq), count)
+                            msg =
+                                history?.find?.(m => Number(m.seq) === Number(seq)) ||
+                                history?.[history.length - 1] ||
+                                history?.[0]
+                            source = 'group.getChatHistory'
+                        } else if (typeof group?.getChatHistory === 'function') {
+                            const history = await group.getChatHistory(0, count)
+                            msg = history?.[history.length - 1] || history?.[0]
+                            source = 'group.getChatHistory.latest'
+                        }
+                    } catch {}
+                }
+                if (!msg && userId && bot.pickUser) {
+                    try {
+                        const user = bot.pickUser(parseInt(userId))
+                        if (typeof user?.getChatHistory === 'function') {
+                            const history = await user.getChatHistory(time || 0, count)
+                            msg = time
+                                ? history?.find?.(m => Number(m.time) === Number(time)) || history?.[0]
+                                : history?.[0]
+                            source = 'user.getChatHistory'
+                        }
+                    } catch {}
+                }
+                if (!msg && userId && bot.pickFriend) {
+                    try {
+                        const friend = bot.pickFriend(parseInt(userId))
+                        if (typeof friend?.getChatHistory === 'function') {
+                            const history = await friend.getChatHistory(time || 0, count)
+                            msg = time
+                                ? history?.find?.(m => Number(m.time) === Number(time)) || history?.[0]
+                                : history?.[0]
+                            source = 'friend.getChatHistory'
+                        }
+                    } catch {}
                 }
 
-                if (!msg) {
-                    return { success: false, error: '获取消息失败或消息不存在' }
-                }
+                if (!msg) return { success: false, error: '获取消息失败或消息不存在' }
 
-                return {
+                const data = msg.data || msg
+                const result = {
                     success: true,
-                    message_id: msg.message_id,
+                    source,
+                    message_id: data.message_id || messageId || '',
+                    seq: data.seq || data.message_seq || 0,
+                    rand: data.rand || 0,
+                    group_id: data.group_id || groupId || '',
                     sender: {
-                        user_id: msg.sender?.user_id || msg.user_id,
-                        nickname: msg.sender?.nickname || msg.sender?.card || ''
+                        user_id: data.sender?.user_id || data.user_id || 0,
+                        nickname: data.sender?.nickname || data.sender?.card || data.nickname || ''
                     },
-                    time: msg.time,
-                    message_type: msg.message_type,
-                    content: parseForwardContent(msg.message || msg.content || []),
-                    raw_message: msg.raw_message
+                    time: data.time || 0,
+                    message_type: data.message_type || (data.group_id || groupId ? 'group' : 'private'),
+                    content: parseForwardContent(data.message || data.content || []),
+                    raw_message: data.raw_message || ''
                 }
+                if (args.include_raw) result.raw = data
+                return result
             } catch (err) {
                 return { success: false, error: `获取消息失败: ${err.message}` }
             }
@@ -2328,34 +2615,15 @@ export const messageTools = [
                     return seg
                 })
 
-                let result
-                if (args.group_id) {
-                    // 发送到指定群
-                    const groupId = parseInt(args.group_id)
-                    if (bot.sendApi) {
-                        result = await bot.sendApi('send_group_msg', { group_id: groupId, message: segments })
-                    } else if (bot.pickGroup) {
-                        const group = bot.pickGroup(groupId)
-                        result = await group?.sendMsg(segments)
-                    }
-                } else if (args.user_id) {
-                    // 发送私聊
-                    const userId = parseInt(args.user_id)
-                    if (bot.sendApi) {
-                        result = await bot.sendApi('send_private_msg', { user_id: userId, message: segments })
-                    } else if (bot.pickFriend) {
-                        const friend = bot.pickFriend(userId)
-                        result = await friend?.sendMsg(segments)
-                    }
-                } else if (e) {
-                    // 发送到当前会话
-                    result = await e.reply(segments)
-                } else {
-                    return { success: false, error: '需要指定 group_id 或 user_id，或在会话上下文中使用' }
-                }
+                const result = await sendToolMessage(bot, {
+                    groupId: args.group_id || e?.group_id,
+                    userId: args.user_id || (!args.group_id ? e?.user_id : null),
+                    message: segments,
+                    event: e
+                })
 
                 return {
-                    success: true,
+                    success: !!result,
                     message_id: result?.message_id || result?.data?.message_id,
                     segment_count: segments.length
                 }
@@ -2955,160 +3223,93 @@ export const messageTools = [
     },
 
     {
-        name: 'send_pb_message',
+        name: 'send_protocol_packet',
         description:
-            '发送 Protobuf 格式消息或 OIDB 服务请求。支持 icqq/TRSS 的 sendOidb/sendUni，也支持 OneBot 的扩展 API。',
+            '发送底层协议包。支持 icqq 的 sendOidb、sendUni、sendOidbSvcTrpcTcp、writeUni、sendPacket、sendMergeUni 和 OneBot 扩展 API。',
         inputSchema: {
             type: 'object',
             properties: {
-                pb_data: { type: 'string', description: 'Protobuf 数据（Base64编码）或 JSON 格式的 pb 结构' },
+                pb_data: { type: 'string', description: '包体数据，默认按 base64 解析；也可传 JSON 字符串' },
                 pb_type: {
                     type: 'string',
-                    description: 'PB消息类型或OIDB命令，如: rich, long_msg, ark, custom, 或 OidbSvc.0x568_22 等'
+                    description: '命令名，如 OidbSvc.0x568_22、OidbSvcTrpcTcp.0xf5b_1、MsgProxy.SendMsg'
                 },
-                group_id: { type: 'string', description: '目标群号' },
-                user_id: { type: 'string', description: '目标用户QQ号' }
-            },
-            required: ['pb_data']
+                cmd: { type: 'string', description: '协议命令名，优先级高于 pb_type' },
+                method: {
+                    type: 'string',
+                    enum: [
+                        'auto',
+                        'send_oidb',
+                        'send_oidb_svc_trpc_tcp',
+                        'send_uni',
+                        'write_uni',
+                        'send_packet',
+                        'send_merge_uni',
+                        'send_api',
+                        'onebot'
+                    ],
+                    description: '发送方法，默认 auto'
+                },
+                body_encoding: {
+                    type: 'string',
+                    enum: ['auto', 'base64', 'hex', 'json', 'text', 'utf8'],
+                    description: '包体编码，默认 auto'
+                },
+                encode_json: { type: 'boolean', description: 'JSON 包体是否用 icqq pb.encode 编码，默认 true' },
+                decode_response: { type: 'boolean', description: '是否尝试解码 Buffer 响应，默认 true' },
+                timeout: { type: 'number', description: '等待响应超时秒数，默认 6；write_uni 不等待' },
+                seq: { type: 'number', description: 'sendPacket/writeUni 自定义 seq，默认自动生成' },
+                packet_type: { type: 'number', description: 'sendPacket build.type，默认 0xb' },
+                encrypt: { type: 'number', description: 'sendPacket build.encrypt，默认 0x1' },
+                extra: { type: 'object', description: 'icqq 发包 extra 参数' },
+                packets: {
+                    type: 'array',
+                    description: 'send_merge_uni 使用的包列表 [{cmd, body, body_encoding, need_response}]'
+                },
+                params: { type: 'object', description: 'send_api/onebot 模式下透传给 bot.sendApi 的参数' },
+                action: { type: 'string', description: 'send_api/onebot 模式下调用的 API 名称，默认 send_pb_msg' },
+                group_id: { type: 'string', description: 'OneBot 扩展 API 的目标群号' },
+                user_id: { type: 'string', description: 'OneBot 扩展 API 的目标用户 QQ 号' }
+            }
         },
         handler: async (args, ctx) => {
             try {
-                const e = ctx.getEvent()
-                const bot = e?.bot || ctx.getBot?.() || global.Bot
-                if (!bot) {
-                    return { success: false, error: '无法获取Bot实例' }
-                }
-
-                const targetGroupId = args.group_id ? parseInt(args.group_id) : e?.group_id
-                const targetUserId = args.user_id ? parseInt(args.user_id) : !targetGroupId ? e?.user_id : null
-                const isGroup = !!targetGroupId
-                const pbType = args.pb_type || 'custom'
-
-                let pbData = args.pb_data
-                let result = null
-                let method = ''
-
-                // 解析 JSON 格式的 pb_data
-                try {
-                    if (typeof pbData === 'string' && pbData.startsWith('{')) {
-                        pbData = JSON.parse(pbData)
-                    }
-                } catch {}
-
-                // 解码 Base64 数据
-                let decodedData = pbData
-                if (typeof pbData === 'string' && !pbData.startsWith('{')) {
-                    try {
-                        decodedData = Buffer.from(pbData, 'base64')
-                    } catch {}
-                }
-
-                // 检查是否是 OIDB 服务命令
-                const isOidbCmd = pbType.startsWith('OidbSvc') || pbType.startsWith('oidb')
-
-                // icqq/TRSS: 使用 sendOidb 发送 OIDB 请求
-                if (isOidbCmd && (bot.sendOidb || bot.sendUni)) {
-                    try {
-                        const sendFn = bot.sendOidb || bot.sendUni
-                        result = await sendFn.call(bot, pbType, decodedData)
-                        method = 'icqq_oidb'
-                        return {
-                            success: true,
-                            method,
-                            cmd: pbType,
-                            response: result ? (Buffer.isBuffer(result) ? result.toString('base64') : result) : null
-                        }
-                    } catch (oidbErr) {
-                        return { success: false, error: `OIDB调用失败: ${oidbErr.message}`, cmd: pbType }
-                    }
-                }
-
-                // icqq: 使用 pickGroup/pickFriend 的方法
-                if (bot.pickGroup && isGroup && targetGroupId) {
-                    try {
-                        const group = bot.pickGroup(targetGroupId)
-                        if (group.sendOidb && isOidbCmd) {
-                            result = await group.sendOidb(pbType, decodedData)
-                            method = 'group_oidb'
-                            return {
-                                success: true,
-                                method,
-                                cmd: pbType,
-                                response: result ? (Buffer.isBuffer(result) ? result.toString('base64') : result) : null
-                            }
-                        }
-                    } catch {}
-                }
-
-                // OneBot API: send_pb_msg
-                if (bot.sendApi) {
-                    try {
-                        const apiParams = {
-                            [isGroup ? 'group_id' : 'user_id']: isGroup ? targetGroupId : targetUserId,
-                            pb_data: typeof pbData === 'string' ? pbData : JSON.stringify(pbData),
-                            pb_type: pbType
-                        }
-                        result = await bot.sendApi('send_pb_msg', apiParams)
-                        method = 'send_pb_msg'
-                        if (result?.status === 'ok' || result?.retcode === 0 || result?.message_id) {
-                            return {
-                                success: true,
-                                method,
-                                message_id: result.message_id || result.data?.message_id,
-                                pb_type: pbType
-                            }
-                        }
-                    } catch {}
-
-                    // 尝试 raw segment
-                    try {
-                        const rawSeg = { type: 'raw', data: { data: pbData } }
-                        const apiName = isGroup ? 'send_group_msg' : 'send_private_msg'
-                        result = await bot.sendApi(apiName, {
-                            [isGroup ? 'group_id' : 'user_id']: isGroup ? targetGroupId : targetUserId,
-                            message: [rawSeg]
-                        })
-                        method = 'raw_segment'
-                        if (result?.status === 'ok' || result?.retcode === 0 || result?.message_id) {
-                            return {
-                                success: true,
-                                method,
-                                message_id: result.message_id || result.data?.message_id
-                            }
-                        }
-                    } catch {}
-                }
-
-                // icqq: sendPb/sendPbMsg
-                if (bot.sendPb || bot.sendPbMsg) {
-                    try {
-                        const sendFn = bot.sendPb || bot.sendPbMsg
-                        result = await sendFn.call(bot, isGroup ? targetGroupId : targetUserId, decodedData, isGroup)
-                        method = 'icqq_pb'
-                        if (result) {
-                            return {
-                                success: true,
-                                method,
-                                message_id: result.message_id
-                            }
-                        }
-                    } catch {}
-                }
-
-                return {
-                    success: false,
-                    error: '当前协议端不支持 PB 消息发送',
-                    note: 'PB/OIDB 消息需要 icqq/TRSS 或支持扩展API的协议端',
-                    available_methods: {
-                        sendOidb: !!bot.sendOidb,
-                        sendUni: !!bot.sendUni,
-                        sendApi: !!bot.sendApi,
-                        sendPb: !!(bot.sendPb || bot.sendPbMsg),
-                        pickGroup: !!bot.pickGroup
-                    }
-                }
+                return await handleProtocolPacket(args, ctx)
             } catch (err) {
-                return { success: false, error: `发送PB消息失败: ${err.message}` }
+                return { success: false, error: `发送协议包失败: ${err.message}` }
+            }
+        }
+    },
+
+    {
+        name: 'send_pb_message',
+        description: '发送 Protobuf/OIDB/Uni/SSO 协议包，等同于 send_protocol_packet。',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                pb_data: { type: 'string', description: '包体数据，默认按 base64 解析；也可传 JSON 字符串' },
+                pb_type: {
+                    type: 'string',
+                    description: '命令名，如 OidbSvc.0x568_22、OidbSvcTrpcTcp.0xf5b_1、MsgProxy.SendMsg'
+                },
+                cmd: { type: 'string', description: '协议命令名，优先级高于 pb_type' },
+                method: { type: 'string', description: '发送方法，默认 auto' },
+                body_encoding: { type: 'string', description: '包体编码，默认 auto' },
+                encode_json: { type: 'boolean', description: 'JSON 包体是否用 icqq pb.encode 编码，默认 true' },
+                decode_response: { type: 'boolean', description: '是否尝试解码 Buffer 响应，默认 true' },
+                timeout: { type: 'number', description: '等待响应超时秒数，默认 6' },
+                seq: { type: 'number', description: 'sendPacket/writeUni 自定义 seq' },
+                extra: { type: 'object', description: 'icqq 发包 extra 参数' },
+                packets: { type: 'array', description: 'send_merge_uni 使用的包列表' },
+                params: { type: 'object', description: 'send_api/onebot 模式下透传参数' },
+                action: { type: 'string', description: 'send_api/onebot 模式下调用的 API 名称' }
+            }
+        },
+        handler: async (args, ctx) => {
+            try {
+                return await handleProtocolPacket(args, ctx)
+            } catch (err) {
+                return { success: false, error: `发送协议包失败: ${err.message}` }
             }
         }
     },

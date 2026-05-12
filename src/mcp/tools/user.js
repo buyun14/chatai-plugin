@@ -340,7 +340,7 @@ export const userTools = [
                 let profile = {}
                 try {
                     if (bot.getStrangerInfo) {
-                        profile = (await bot.getStrangerInfo(userId, true)) || {}
+                        profile = (await bot.getStrangerInfo(userId)) || {}
                     }
                 } catch (e) {}
 

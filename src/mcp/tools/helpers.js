@@ -483,7 +483,7 @@ export async function getGroupMemberList({ bot, event, groupId }) {
         // 方式3: bot.getGroupMemberList
         if (memberList.length === 0 && bot?.getGroupMemberList) {
             const result = await bot.getGroupMemberList(parseInt(gid))
-            memberList = Array.isArray(result) ? result : []
+            memberList = result instanceof Map ? mapToMemberList(result) : Array.isArray(result) ? result : []
         }
     } catch (err) {
         logger.error('[helpers] 获取群成员列表失败:', err.message)

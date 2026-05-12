@@ -679,25 +679,72 @@ export const fileTools = [
                     const group = bot.pickGroup?.(targetId)
                     if (group?.sendFile) {
                         await group.sendFile(args.file, '/', fileName)
-                        return { success: true, target: 'group', target_id: targetId, name: fileName }
+                        return {
+                            success: true,
+                            target: 'group',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'group.sendFile'
+                        }
                     }
-                    // 尝试 NapCat 方式：发送文件消息段
+                    if (bot.sendApi) {
+                        await bot.sendApi('upload_group_file', {
+                            group_id: targetId,
+                            file: args.file,
+                            name: fileName,
+                            folder: '/'
+                        })
+                        return {
+                            success: true,
+                            target: 'group',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'upload_group_file'
+                        }
+                    }
                     if (bot.sendGroupMsg) {
                         await bot.sendGroupMsg(targetId, [{ type: 'file', data: { file: args.file, name: fileName } }])
-                        return { success: true, target: 'group', target_id: targetId, name: fileName }
+                        return {
+                            success: true,
+                            target: 'group',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'sendGroupMsg.file_segment'
+                        }
                     }
                 } else {
                     const friend = bot.pickFriend?.(targetId)
                     if (friend?.sendFile) {
                         await friend.sendFile(args.file, fileName)
-                        return { success: true, target: 'private', target_id: targetId, name: fileName }
+                        return {
+                            success: true,
+                            target: 'private',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'friend.sendFile'
+                        }
                     }
-                    // 尝试 NapCat 方式
+                    if (bot.sendApi) {
+                        await bot.sendApi('upload_private_file', { user_id: targetId, file: args.file, name: fileName })
+                        return {
+                            success: true,
+                            target: 'private',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'upload_private_file'
+                        }
+                    }
                     if (bot.sendPrivateMsg) {
                         await bot.sendPrivateMsg(targetId, [
                             { type: 'file', data: { file: args.file, name: fileName } }
                         ])
-                        return { success: true, target: 'private', target_id: targetId, name: fileName }
+                        return {
+                            success: true,
+                            target: 'private',
+                            target_id: targetId,
+                            name: fileName,
+                            method: 'sendPrivateMsg.file_segment'
+                        }
                     }
                 }
 

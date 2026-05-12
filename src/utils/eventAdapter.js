@@ -11,23 +11,103 @@ export { getBot, getBotSelfId, detectAdapter }
  * @returns {Promise<any>}
  */
 export async function callOneBotApi(bot, action, params = {}) {
-    if (typeof bot?.sendApi === 'function') {
+    if (!bot) return null
+
+    const asNumber = value => {
+        if (value === undefined || value === null || value === '') return value
+        const parsed = Number(value)
+        return Number.isNaN(parsed) ? value : parsed
+    }
+
+    const callDirect = async (method, args) => {
+        if (typeof method !== 'function') return undefined
+        return await method.apply(bot, args)
+    }
+
+    const icqqActions = {
+        send_private_msg: () =>
+            callDirect(bot.sendPrivateMsg, [asNumber(params.user_id), params.message, params.source]),
+        send_group_msg: () => callDirect(bot.sendGroupMsg, [asNumber(params.group_id), params.message, params.source]),
+        get_login_info: async () => ({
+            user_id: bot.uin || bot.self_id,
+            nickname: bot.nickname || bot.info?.nickname || ''
+        }),
+        get_status: async () => {
+            const online = bot.isOnline?.() ?? bot.status === 11
+            return { online, good: online === true, stat: bot.stat || {} }
+        },
+        get_stranger_info: () => callDirect(bot.getStrangerInfo, [asNumber(params.user_id)]),
+        get_group_info: () => callDirect(bot.getGroupInfo, [asNumber(params.group_id), params.no_cache]),
+        get_group_member_list: () => callDirect(bot.getGroupMemberList, [asNumber(params.group_id), params.no_cache]),
+        get_msg: () => callDirect(bot.getMsg, [params.message_id]),
+        delete_msg: () => callDirect(bot.deleteMsg, [params.message_id]),
+        send_like: () => callDirect(bot.sendLike, [asNumber(params.user_id), params.times]),
+        set_qq_avatar: () => callDirect(bot.setAvatar, [params.file]),
+        set_group_ban: () =>
+            callDirect(bot.setGroupBan, [asNumber(params.group_id), asNumber(params.user_id), params.duration]),
+        set_group_kick: () =>
+            callDirect(bot.setGroupKick, [
+                asNumber(params.group_id),
+                asNumber(params.user_id),
+                params.reject_add_request,
+                params.message
+            ]),
+        set_group_card: () =>
+            callDirect(bot.setGroupCard, [asNumber(params.group_id), asNumber(params.user_id), params.card]),
+        set_group_whole_ban: () => callDirect(bot.setGroupWholeBan, [asNumber(params.group_id), params.enable]),
+        set_group_admin: () =>
+            callDirect(bot.setGroupAdmin, [asNumber(params.group_id), asNumber(params.user_id), params.enable]),
+        set_group_name: () =>
+            callDirect(bot.setGroupName, [asNumber(params.group_id), params.group_name || params.name]),
+        set_group_special_title: () =>
+            callDirect(bot.setGroupSpecialTitle, [
+                asNumber(params.group_id),
+                asNumber(params.user_id),
+                params.special_title || params.title,
+                params.duration
+            ]),
+        send_group_poke: () => callDirect(bot.sendGroupPoke, [asNumber(params.group_id), asNumber(params.user_id)]),
+        group_poke: () => callDirect(bot.sendGroupPoke, [asNumber(params.group_id), asNumber(params.user_id)]),
+        send_poke: () =>
+            params.group_id
+                ? callDirect(bot.sendGroupPoke, [asNumber(params.group_id), asNumber(params.user_id)])
+                : undefined,
+        get_cookies: () => callDirect(bot.getCookies, [params.domain]),
+        get_credentials: async () => {
+            const domain = params.domain
+            const cookies = typeof bot.getCookies === 'function' ? bot.getCookies(domain) : ''
+            const csrfToken = typeof bot.getCsrfToken === 'function' ? bot.getCsrfToken() : undefined
+            return { cookies, csrf_token: csrfToken, bkn: csrfToken }
+        },
+        set_self_longnick: () => callDirect(bot.setSignature, [params.long_nick || params.longNick])
+    }
+
+    if (icqqActions[action] && (bot.pickGroup || bot.pickFriend || bot.fl || bot.gl)) {
+        try {
+            const result = await icqqActions[action]()
+            if (result !== undefined) return result
+        } catch {}
+    }
+
+    if (typeof bot.sendApi === 'function') {
         try {
             return await bot.sendApi(action, params)
         } catch {}
     }
+
     const camelAction = action.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
-    if (typeof bot?.[camelAction] === 'function') {
+    if (typeof bot[camelAction] === 'function') {
         try {
             return await bot[camelAction](params)
         } catch {}
     }
-    if (typeof bot?.[action] === 'function') {
+    if (typeof bot[action] === 'function') {
         try {
             return await bot[action](params)
         } catch {}
     }
-    const baseUrl = bot?.config?.baseUrl || bot?.adapter?.config?.baseUrl
+
+    const baseUrl = bot.config?.baseUrl || bot.adapter?.config?.baseUrl
     if (baseUrl) {
         try {
             const res = await fetch(`${baseUrl}/${action}`, {

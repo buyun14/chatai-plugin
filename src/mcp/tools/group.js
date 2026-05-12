@@ -3,7 +3,7 @@
  * 获取群信息、成员列表等
  */
 
-import { groupNoticeApi } from './helpers.js'
+import { groupNoticeApi, getGroupMemberList } from './helpers.js'
 
 export const groupTools = [
     {
@@ -118,25 +118,7 @@ export const groupTools = [
 
             let memberList = []
             try {
-                if (bot.getGroupMemberList) {
-                    const result = await bot.getGroupMemberList(groupId)
-                    // 处理返回值可能是 Map 的情况
-                    if (result instanceof Map) {
-                        memberList = Array.from(result.values())
-                    } else if (Array.isArray(result)) {
-                        memberList = result
-                    } else {
-                        memberList = []
-                    }
-                } else {
-                    const group = bot.pickGroup?.(groupId)
-                    if (group?.getMemberMap) {
-                        const memberMap = await group.getMemberMap()
-                        for (const [uid, member] of memberMap) {
-                            memberList.push({ user_id: uid, ...member })
-                        }
-                    }
-                }
+                memberList = await getGroupMemberList({ bot, event: ctx.getEvent?.(), groupId })
             } catch (e) {
                 return { success: false, error: `获取成员列表失败: ${e.message}`, members: [] }
             }
@@ -282,24 +264,7 @@ export const groupTools = [
                 // 获取成员列表
                 let memberList = []
                 try {
-                    if (bot.getGroupMemberList) {
-                        const result = await bot.getGroupMemberList(groupId)
-                        if (result instanceof Map) {
-                            memberList = Array.from(result.values())
-                        } else if (Array.isArray(result)) {
-                            memberList = result
-                        } else {
-                            memberList = []
-                        }
-                    } else {
-                        const group = bot.pickGroup?.(groupId)
-                        if (group?.getMemberMap) {
-                            const memberMap = await group.getMemberMap()
-                            for (const [uid, member] of memberMap) {
-                                memberList.push({ user_id: uid, ...member })
-                            }
-                        }
-                    }
+                    memberList = await getGroupMemberList({ bot, event: e, groupId })
                 } catch (e) {}
 
                 // 筛选管理员
@@ -361,24 +326,7 @@ export const groupTools = [
                 // 获取成员列表
                 let memberList = []
                 try {
-                    if (bot.getGroupMemberList) {
-                        const result = await bot.getGroupMemberList(groupId)
-                        if (result instanceof Map) {
-                            memberList = Array.from(result.values())
-                        } else if (Array.isArray(result)) {
-                            memberList = result
-                        } else {
-                            memberList = []
-                        }
-                    } else {
-                        const group = bot.pickGroup?.(groupId)
-                        if (group?.getMemberMap) {
-                            const memberMap = await group.getMemberMap()
-                            for (const [uid, member] of memberMap) {
-                                memberList.push({ user_id: uid, ...member })
-                            }
-                        }
-                    }
+                    memberList = await getGroupMemberList({ bot, event: e, groupId })
                 } catch (e) {
                     return { success: false, error: '获取成员列表失败' }
                 }

@@ -3,6 +3,8 @@
  * 包含天气、一言、骰子、倒计时、提醒、短链接、IP查询等实用功能
  */
 
+import { segment } from '../../utils/messageParser.js'
+
 const activeReminders = new Map()
 
 export const extraTools = [

@@ -370,21 +370,38 @@ export async function getMessage(e, messageId, groupId = null) {
     try {
         switch (platform) {
             case 'icqq': {
-                if (groupId) {
-                    const group = bot.pickGroup(parseInt(groupId))
-                    // 尝试 getMsg
-                    if (group.getMsg) {
-                        return await group.getMsg(messageId)
+                try {
+                    if (typeof bot?.getMsg === 'function' && String(messageId).length > 8) {
+                        const msg = await bot.getMsg(messageId)
+                        if (msg) return msg
                     }
-                    // 尝试 getChatHistory
-                    if (group.getChatHistory) {
-                        const history = await group.getChatHistory(parseInt(messageId), 1)
-                        return history?.[0] || null
+                } catch {}
+                const gid = groupId || e?.group_id
+                if (gid) {
+                    const group = bot.pickGroup?.(parseInt(gid)) || e?.group
+                    const seq = parseInt(messageId)
+                    try {
+                        if (typeof group?.getMsg === 'function') {
+                            const msg = await group.getMsg(seq)
+                            if (msg) return msg
+                        }
+                    } catch {}
+                    if (typeof group?.getChatHistory === 'function') {
+                        const history = await group.getChatHistory(Number.isNaN(seq) ? 0 : seq, 20)
+                        return (
+                            history?.find?.(msg => Number(msg.seq) === seq) ||
+                            history?.[history.length - 1] ||
+                            history?.[0] ||
+                            null
+                        )
                     }
                 } else if (e?.user_id) {
-                    const friend = bot.pickFriend(e.user_id)
-                    if (friend.getMsg) {
-                        return await friend.getMsg(messageId)
+                    const user =
+                        bot.pickUser?.(parseInt(e.user_id)) || bot.pickFriend?.(parseInt(e.user_id)) || e.friend
+                    if (typeof user?.getChatHistory === 'function') {
+                        const time = parseInt(messageId)
+                        const history = await user.getChatHistory(Number.isNaN(time) ? 0 : time, 20)
+                        return history?.find?.(msg => Number(msg.time) === time) || history?.[0] || null
                     }
                 }
                 break
@@ -394,7 +411,6 @@ export async function getMessage(e, messageId, groupId = null) {
             case 'onebot':
             case 'go-cqhttp':
             case 'lagrange': {
-                // OneBot: get_msg
                 const msg = (await bot.getMsg?.(messageId)) || (await bot.get_msg?.({ message_id: messageId }))
                 return msg || null
             }
@@ -566,22 +582,30 @@ export async function deleteMessage(e, messageId) {
     try {
         switch (platform) {
             case 'icqq': {
-                // icqq: recallMsg
-                if (e?.group_id) {
-                    const group = bot.pickGroup(parseInt(e.group_id))
-                    await group.recallMsg?.(messageId)
-                } else if (e?.user_id) {
-                    const friend = bot.pickFriend(e.user_id)
-                    await friend.recallMsg?.(messageId)
+                if (typeof bot?.deleteMsg === 'function') {
+                    try {
+                        await bot.deleteMsg(messageId)
+                        return true
+                    } catch {}
                 }
-                return true
+                if (e?.group_id) {
+                    const group = bot.pickGroup?.(parseInt(e.group_id)) || e.group
+                    await group?.recallMsg?.(messageId)
+                    return true
+                }
+                if (e?.user_id) {
+                    const user =
+                        bot.pickUser?.(parseInt(e.user_id)) || bot.pickFriend?.(parseInt(e.user_id)) || e.friend
+                    await user?.recallMsg?.(messageId)
+                    return true
+                }
+                return false
             }
 
             case 'napcat':
             case 'onebot':
             case 'go-cqhttp':
             case 'lagrange': {
-                // OneBot: delete_msg
                 ;(await bot.deleteMsg?.(messageId)) || (await bot.delete_msg?.({ message_id: messageId }))
                 return true
             }

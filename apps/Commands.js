@@ -66,11 +66,14 @@ function getPortraitMessagePlainText(m) {
     return ''
 }
 
-/**
- * 推断一条 user 消息归属的用户 ID（与 ChatService 群聊标签格式一致）
- * @param {object} m
- * @returns {string|null}
- */
+function getPortraitChatPlainText(chat) {
+    if (!Array.isArray(chat?.message)) return ''
+    return chat.message
+        .filter(part => part.type === 'text')
+        .map(part => part.text || '')
+        .join('')
+}
+
 function getStoredUserIdFromPortraitMessage(m) {
     const meta = m.metadata
     if (meta) {
@@ -82,6 +85,23 @@ function getStoredUserIdFromPortraitMessage(m) {
     const labeled = text.match(/^\[([^\]]+)\((\d+)\)\]:\s*/)
     if (labeled) return labeled[2]
     return null
+}
+
+function getPortraitMessagesFromDatabase(conversationId, userIdStr, fetchLimit, sharedGroupConv) {
+    databaseService.init()
+    const allMessages = databaseService.getMessages(conversationId, fetchLimit)
+    let userMessages = allMessages.filter(m => m.role === 'user')
+    if (sharedGroupConv) {
+        userMessages = userMessages.filter(m => {
+            const sid = getStoredUserIdFromPortraitMessage(m)
+            return sid != null && sid === userIdStr
+        })
+    }
+    return userMessages.map(m => ({
+        content: getPortraitMessagePlainText(m),
+        timestamp: m.timestamp,
+        source: 'database'
+    }))
 }
 
 // AICommands 必须是第一个导出的类，确保被正确加载
@@ -126,7 +146,7 @@ export class AICommands extends plugin {
                     fnc: 'groupSummaryModern'
                 },
                 {
-                    reg: '^#(个人画像|用户画像|分析我)$',
+                    reg: '^#(个人画像|用户画像|分析我)(?:\\s+.*)?$',
                     fnc: 'userPortrait'
                 },
                 {
@@ -763,20 +783,19 @@ export class AICommands extends plugin {
             } catch (historyErr) {
                 logger.debug('[AI-Commands] Bot API 获取群聊历史失败:', historyErr.message)
             }
-            if (messages.length < maxMessages) {
+            if (messages.length === 0) {
                 const memoryMessages = memoryManager.getGroupMessageBuffer(groupId) || []
-                if (memoryMessages.length > messages.length) {
+                if (memoryMessages.length > 0) {
                     messages = memoryMessages
                     dataSource = '内存缓冲'
                 }
             }
-            /* 数据库始终作为保底来源，即使其他来源已有数据，数据库可能包含更多历史 */
-            {
+            if (messages.length === 0) {
                 try {
                     databaseService.init()
                     const conversationId = `group_summary_${groupId}`
                     const rawDbMessages = databaseService.getMessages(conversationId, maxMessages)
-                    if (rawDbMessages && rawDbMessages.length > messages.length) {
+                    if (rawDbMessages && rawDbMessages.length > 0) {
                         const dbMessages = rawDbMessages
                             .map(m => ({
                                 nickname: m.metadata?.nickname || '用户',
@@ -792,7 +811,7 @@ export class AICommands extends plugin {
                                 timestamp: m.timestamp
                             }))
                             .filter(m => m.content && m.content.trim())
-                        if (dbMessages.length > messages.length) {
+                        if (dbMessages.length > 0) {
                             messages = dbMessages
                             dataSource = '数据库'
                         }
@@ -1108,20 +1127,19 @@ ${dialogText}${truncatedNote}`
             } catch (historyErr) {
                 logger.debug('[AI-Commands] Bot API 获取群聊历史失败:', historyErr.message)
             }
-            if (messages.length < maxMessages) {
+            if (messages.length === 0) {
                 const memoryMessages = memoryManager.getGroupMessageBuffer(groupId) || []
-                if (memoryMessages.length > messages.length) {
+                if (memoryMessages.length > 0) {
                     messages = memoryMessages
                     dataSource = '内存缓冲'
                 }
             }
-            /* 数据库始终作为保底来源，即使其他来源已有数据，数据库可能包含更多历史 */
-            {
+            if (messages.length === 0) {
                 try {
                     databaseService.init()
                     const conversationId = `group_summary_${groupId}`
                     const rawDbMessages = databaseService.getMessages(conversationId, maxMessages)
-                    if (rawDbMessages && rawDbMessages.length > messages.length) {
+                    if (rawDbMessages && rawDbMessages.length > 0) {
                         const dbMessages = rawDbMessages
                             .map(m => ({
                                 nickname: m.metadata?.nickname || '用户',
@@ -1137,7 +1155,7 @@ ${dialogText}${truncatedNote}`
                                 timestamp: m.timestamp
                             }))
                             .filter(m => m.content && m.content.trim())
-                        if (dbMessages.length > messages.length) {
+                        if (dbMessages.length > 0) {
                             messages = dbMessages
                             dataSource = '数据库'
                         }
@@ -1375,6 +1393,13 @@ ${dialogText}${truncatedNote}`
      */
     async userPortrait() {
         const e = this.e
+        const atMsg = e.group_id
+            ? e.message?.find(msg => msg.type === 'at' && String(msg.qq) !== String(e.self_id))
+            : null
+        if (atMsg?.qq) {
+            return await this.userProfileByAt()
+        }
+
         if (!config.get('features.userPortrait.enabled')) {
             await this.reply('个人画像功能未启用', true)
             return true
@@ -1383,19 +1408,18 @@ ${dialogText}${truncatedNote}`
         try {
             await this.reply('正在分析用户画像...', true)
 
-            databaseService.init()
             await contextManager.init()
             const groupId = e.group_id
             const userId = e.user_id
             const nickname = e.sender?.nickname || '用户'
-            const minMessages = config.get('features.userPortrait.minMessages') || 10
+            const configuredMinMessages = Number(config.get('features.userPortrait.minMessages')) || 10
+            const requiredMessages = 21
 
             const userIdStr = String(userId).includes('_') ? String(userId).split('_').pop() : String(userId)
-            /* conversationId 与 ChatService / ContextManager 一致（含群用户隔离） */
             const conversationId = contextManager.getConversationId(userIdStr, groupId ? String(groupId) : null)
-            // 读取配置的消息数量限制 - 优先使用前端配置
-            const maxMessages =
-                config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories') || 100
+            const configuredMaxMessages =
+                Number(config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories')) || 100
+            const maxMessages = Math.max(configuredMaxMessages, configuredMinMessages, requiredMessages)
             const analyzeCount = Math.min(maxMessages, 100)
 
             const isolation = config.get('context.isolation') || {}
@@ -1403,17 +1427,41 @@ ${dialogText}${truncatedNote}`
             const sharedGroupConv = groupId && !groupUserIsolation && conversationId === `group:${groupId}`
             const fetchLimit = sharedGroupConv ? Math.min(maxMessages * 25, 2000) : maxMessages
 
-            const allMessages = databaseService.getMessages(conversationId, fetchLimit)
-            let userMessages = allMessages.filter(m => m.role === 'user')
-            if (sharedGroupConv) {
-                userMessages = userMessages.filter(m => {
-                    const sid = getStoredUserIdFromPortraitMessage(m)
-                    return sid != null && sid === userIdStr
-                })
+            let userMessages = []
+            let dataSource = 'Bot API'
+            if (groupId) {
+                const apiMessages = await getUserTextHistory(e, userId, maxMessages)
+                userMessages = apiMessages
+                    .map(chat => ({
+                        content: getPortraitChatPlainText(chat),
+                        timestamp: chat.time ? chat.time * 1000 : Date.now(),
+                        source: 'botapi'
+                    }))
+                    .filter(m => m.content && m.content.trim())
             }
 
-            if (userMessages.length < minMessages) {
-                await this.reply(`消息数量不足（需要至少${minMessages}条），无法生成画像`, true)
+            if (userMessages.length < configuredMinMessages) {
+                const dbMessages = getPortraitMessagesFromDatabase(
+                    conversationId,
+                    userIdStr,
+                    fetchLimit,
+                    sharedGroupConv
+                ).filter(m => m.content && m.content.trim())
+                if (dbMessages.length > 0) {
+                    const existingKeys = new Set(userMessages.map(m => `${m.timestamp || ''}:${m.content || ''}`))
+                    const supplementMessages = dbMessages.filter(m => {
+                        const key = `${m.timestamp || ''}:${m.content || ''}`
+                        if (existingKeys.has(key)) return false
+                        existingKeys.add(key)
+                        return true
+                    })
+                    userMessages = [...userMessages, ...supplementMessages].slice(-maxMessages)
+                    if (!dataSource || dataSource === 'Bot API') dataSource = 'Bot API+数据库'
+                }
+            }
+
+            if (userMessages.length < requiredMessages) {
+                await this.reply(`有效发言仅 ${userMessages.length} 条，暂时无法生成可靠画像，请稍后再试`, true)
                 return true
             }
 
@@ -1716,6 +1764,11 @@ ${userMessages
      */
     async userProfileByAt() {
         const e = this.e
+        if (!config.get('features.userPortrait.enabled')) {
+            await this.reply('个人画像功能未启用', true)
+            return true
+        }
+
         if (!e.group_id) {
             await this.reply('此功能仅支持群聊', true)
             return true
@@ -1751,10 +1804,12 @@ ${userMessages
 
             await this.reply(`正在分析 ${targetNickname} 的用户画像...`, true)
 
-            // 获取用户聊天记录 - 使用配置项
-            const maxMessages =
-                config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories') || 100
-            const userMessages = await getUserTextHistory(e, targetUserId, maxMessages)
+            const configuredMaxMessages =
+                Number(config.get('features.groupSummary.maxMessages') || config.get('memory.maxMemories')) || 100
+            const configuredMinMessages = Number(config.get('features.userPortrait.minMessages')) || 10
+            const requiredMessages = 21
+            const maxMessages = Math.max(configuredMaxMessages, configuredMinMessages, requiredMessages)
+            let userMessages = await getUserTextHistory(e, targetUserId, maxMessages)
 
             const profileModel = await getGroupFeatureModel(e.group_id, 'profileModel', [
                 'features.userPortrait.model',
@@ -1763,8 +1818,44 @@ ${userMessages
             const displayModel = profileModel || config.get('llm.defaultModel') || '默认模型'
             const shortModel = displayModel.split('/').pop()
 
-            if (!userMessages || userMessages.length < 10) {
-                await this.reply(`${targetNickname} 的聊天记录太少（需要至少10条），无法生成画像`, true)
+            if (!userMessages || userMessages.length < configuredMinMessages) {
+                await contextManager.init()
+                const targetUserIdStr = String(targetUserId).includes('_')
+                    ? String(targetUserId).split('_').pop()
+                    : String(targetUserId)
+                const conversationId = contextManager.getConversationId(targetUserIdStr, String(e.group_id))
+                const isolation = config.get('context.isolation') || {}
+                const groupUserIsolation = isolation.groupUserIsolation ?? false
+                const sharedGroupConv = e.group_id && !groupUserIsolation && conversationId === `group:${e.group_id}`
+                const fetchLimit = sharedGroupConv ? Math.min(maxMessages * 25, 2000) : maxMessages
+                const dbMessages = getPortraitMessagesFromDatabase(
+                    conversationId,
+                    targetUserIdStr,
+                    fetchLimit,
+                    sharedGroupConv
+                )
+                    .filter(m => m.content && m.content.trim())
+                    .map(m => ({
+                        time: m.timestamp ? Math.floor(m.timestamp / 1000) : Math.floor(Date.now() / 1000),
+                        message: [{ type: 'text', text: m.content }],
+                        sender: { user_id: targetUserId }
+                    }))
+                if (dbMessages.length > 0) {
+                    const existingKeys = new Set(
+                        (userMessages || []).map(chat => `${chat.time || ''}:${getPortraitChatPlainText(chat)}`)
+                    )
+                    const supplementMessages = dbMessages.filter(chat => {
+                        const key = `${chat.time || ''}:${getPortraitChatPlainText(chat)}`
+                        if (existingKeys.has(key)) return false
+                        existingKeys.add(key)
+                        return true
+                    })
+                    userMessages = [...(userMessages || []), ...supplementMessages].slice(-maxMessages)
+                }
+            }
+
+            if (!userMessages || userMessages.length < requiredMessages) {
+                await this.reply(`有效发言仅 ${userMessages?.length || 0} 条，暂时无法生成可靠画像，请稍后再试`, true)
                 return true
             }
 
@@ -1919,9 +2010,18 @@ ${rawChatHistory}`
                             timestamp: m.timestamp
                         }))
 
-                    if (todayMemMessages.length > messages.length) {
-                        messages = todayMemMessages
-                        dataSource = '内存缓冲'
+                    if (todayMemMessages.length > 0) {
+                        const existingKeys = new Set(messages.map(m => `${m.timestamp || ''}:${m.content || ''}`))
+                        const supplementMessages = todayMemMessages.filter(m => {
+                            const key = `${m.timestamp || ''}:${m.content || ''}`
+                            if (existingKeys.has(key)) return false
+                            existingKeys.add(key)
+                            return true
+                        })
+                        if (supplementMessages.length > 0) {
+                            messages = [...messages, ...supplementMessages].slice(-maxMessages)
+                            dataSource = dataSource ? `${dataSource}+内存缓冲` : '内存缓冲'
+                        }
                     }
                 }
             }
@@ -1951,9 +2051,18 @@ ${rawChatHistory}`
                             }))
                             .filter(m => m.content && m.content.trim())
 
-                        if (todayDbMessages.length > messages.length) {
-                            messages = todayDbMessages
-                            dataSource = '数据库'
+                        if (todayDbMessages.length > 0) {
+                            const existingKeys = new Set(messages.map(m => `${m.timestamp || ''}:${m.content || ''}`))
+                            const supplementMessages = todayDbMessages.filter(m => {
+                                const key = `${m.timestamp || ''}:${m.content || ''}`
+                                if (existingKeys.has(key)) return false
+                                existingKeys.add(key)
+                                return true
+                            })
+                            if (supplementMessages.length > 0) {
+                                messages = [...messages, ...supplementMessages].slice(-maxMessages)
+                                dataSource = dataSource ? `${dataSource}+数据库` : '数据库'
+                            }
                         }
                     }
                 } catch (dbErr) {
@@ -2092,9 +2201,9 @@ async function getGroupChatHistory(e, num) {
 
     try {
         let allChats = []
-        let seq = e.seq || e.message_id || 0
+        let seq = Number(e.seq) || 0
         let totalScanned = 0
-        const maxScanLimit = Math.min(num * 10, 5000) // 最多扫描5000条
+        const maxScanLimit = Math.min(num * 10, 5000)
 
         while (allChats.length < num && totalScanned < maxScanLimit) {
             const chatHistory = await group.getChatHistory(seq, 20)
@@ -2103,11 +2212,10 @@ async function getGroupChatHistory(e, num) {
 
             totalScanned += chatHistory.length
 
-            const oldestSeq = chatHistory[0]?.seq || chatHistory[0]?.message_id
-            if (seq === oldestSeq) break
-            seq = oldestSeq
+            const oldestSeq = Number(chatHistory[0]?.seq) || 0
+            if (seq && oldestSeq && seq === oldestSeq) break
+            if (oldestSeq) seq = oldestSeq
 
-            // 过滤有效消息（包含文本或@）
             const filteredChats = chatHistory.filter(chat => {
                 if (!chat.message || chat.message.length === 0) return false
                 return chat.message.some(part => part.type === 'text' || part.type === 'at')
@@ -2116,6 +2224,8 @@ async function getGroupChatHistory(e, num) {
             if (filteredChats.length > 0) {
                 allChats.unshift(...filteredChats.reverse())
             }
+
+            if (!oldestSeq) break
         }
 
         return allChats.slice(-num)
@@ -2140,9 +2250,9 @@ async function getUserTextHistory(e, userId, num) {
 
     try {
         let userChats = []
-        let seq = e.seq || e.message_id || 0
+        let seq = Number(e.seq) || 0
         let totalScanned = 0
-        const maxScanLimit = 3000 // 最多扫描3000条以找到足够的用户消息
+        const maxScanLimit = 3000
 
         while (userChats.length < num && totalScanned < maxScanLimit) {
             const chatHistory = await group.getChatHistory(seq, 20)
@@ -2151,11 +2261,10 @@ async function getUserTextHistory(e, userId, num) {
 
             totalScanned += chatHistory.length
 
-            const oldestSeq = chatHistory[0]?.seq || chatHistory[0]?.message_id
-            if (seq === oldestSeq) break
-            seq = oldestSeq
+            const oldestSeq = Number(chatHistory[0]?.seq) || 0
+            if (seq && oldestSeq && seq === oldestSeq) break
+            if (oldestSeq) seq = oldestSeq
 
-            // 过滤目标用户的消息
             const filteredChats = chatHistory.filter(chat => {
                 const isTargetUser = String(chat.sender?.user_id) === String(userId)
                 if (!isTargetUser) return false
@@ -2166,6 +2275,8 @@ async function getUserTextHistory(e, userId, num) {
             if (filteredChats.length > 0) {
                 userChats.unshift(...filteredChats.reverse())
             }
+
+            if (!oldestSeq) break
         }
 
         return userChats.slice(-num)

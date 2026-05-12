@@ -422,26 +422,27 @@ async function checkIfTargetBot(e, selfId, botIds, bot, targetId, messageId, gro
 
         // 2. 通过消息ID获取原消息发送者
         if (messageId && groupId) {
-            // icqq: getChatHistory
-            if (bot?.pickGroup) {
-                try {
-                    const group = bot.pickGroup(parseInt(groupId))
-                    if (group?.getChatHistory) {
-                        const history = await group.getChatHistory(parseInt(messageId), 1)
-                        if (history?.length > 0) {
-                            const senderId = history[0].sender?.user_id || history[0].user_id
-                            return senderId === selfId || botIds.has(String(senderId))
-                        }
-                    }
-                } catch {}
-            }
-
-            // OneBot: getMsg
+            // OneBot / ICQQ getMsg: message_id 不是 icqq 群历史 seq，优先用消息 API 获取
             if (bot?.getMsg || bot?.get_msg) {
                 try {
                     const msg = await (bot.getMsg?.(messageId) || bot.get_msg?.({ message_id: messageId }))
                     if (msg?.sender?.user_id) {
                         return msg.sender.user_id === selfId || botIds.has(String(msg.sender.user_id))
+                    }
+                } catch {}
+            }
+
+            const seq = Number(e.source?.seq || e.seq || 0)
+            if (seq && bot?.pickGroup) {
+                try {
+                    const group = bot.pickGroup(parseInt(groupId))
+                    if (group?.getChatHistory) {
+                        const history = await group.getChatHistory(seq, 1)
+                        const msg = history?.find?.(item => Number(item.seq) === seq) || history?.[0]
+                        if (msg) {
+                            const senderId = msg.sender?.user_id || msg.user_id
+                            return senderId === selfId || botIds.has(String(senderId))
+                        }
                     }
                 } catch {}
             }

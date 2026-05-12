@@ -1,3 +1,7 @@
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
+
 /**
  * @param {Object} segment - 消息段
  * @returns {Object} 统一的数据对象
@@ -2049,71 +2053,105 @@ export const MessageApi = {
     async getMsg(e, messageId, options = {}) {
         if (!e || !messageId) return null
         const bot = e.bot || Bot
-        const { useSeq = false } = options
+        const { useSeq = false, seq = undefined, time = undefined, count = 20 } = options
+        const groupId = options.groupId || e.group_id
+        const userId = options.userId || e.user_id
 
         let rawMsg = null
         let source = 'unknown'
 
-        try {
-            // NapCat/OneBot: bot.getMsg 或 sendApi（使用 message_id）
-            if (!useSeq && typeof bot?.getMsg === 'function') {
+        if (!useSeq && typeof bot?.getMsg === 'function') {
+            try {
                 rawMsg = await bot.getMsg(messageId)
                 source = 'bot.getMsg'
-            } else if (!useSeq && typeof bot?.sendApi === 'function') {
+            } catch (err) {
+                logger.debug('[MessageApi] bot.getMsg failed:', err.message)
+            }
+        }
+        if (!rawMsg && !useSeq && typeof bot?.sendApi === 'function') {
+            try {
                 const result = await bot.sendApi('get_msg', { message_id: messageId })
                 rawMsg = result?.data || result
                 source = 'sendApi.get_msg'
+            } catch (err) {
+                logger.debug('[MessageApi] sendApi.get_msg failed:', err.message)
             }
-            // icqq: group.getMsg（使用 seq）
-            else if (e.isGroup && e.group?.getMsg) {
-                rawMsg = await e.group.getMsg(messageId)
-                source = 'group.getMsg'
-            }
-            // icqq: group.getChatHistory
-            else if (e.isGroup && e.group?.getChatHistory) {
-                const history = await e.group.getChatHistory(messageId, 1)
-                rawMsg = history?.[0] || null
-                source = 'group.getChatHistory'
-            }
-            // icqq: friend.getChatHistory
-            else if (!e.isGroup && e.friend?.getChatHistory) {
-                const history = await e.friend.getChatHistory(messageId, 1)
-                rawMsg = history?.[0] || null
-                source = 'friend.getChatHistory'
-            }
-
-            if (!rawMsg) return null
-
-            // 统一格式化返回
-            const data = rawMsg.data || rawMsg
-            return {
-                // 消息标识
-                message_id: data.message_id || rawMsg.message_id || messageId,
-                seq: data.seq || rawMsg.seq || data.message_seq || 0,
-                rand: data.rand || rawMsg.rand || 0,
-                time: data.time || rawMsg.time || 0,
-                // 发送者
-                user_id: data.user_id || data.sender?.user_id || rawMsg.user_id || 0,
-                sender: {
-                    user_id: data.sender?.user_id || data.user_id || rawMsg.user_id || 0,
-                    nickname: data.sender?.nickname || data.nickname || rawMsg.nickname || '',
-                    card: data.sender?.card || data.card || rawMsg.card || '',
-                    role: data.sender?.role || 'member',
-                    uid: data.sender?.uid || data.uid || ''
-                },
-                // 群信息
-                group_id: data.group_id || rawMsg.group_id || e.group_id || '',
-                // 消息内容
-                message: data.message || rawMsg.message || [],
-                raw_message: data.raw_message || rawMsg.raw_message || '',
-                // 原始数据
-                _raw: rawMsg,
-                _source: source
-            }
-        } catch (err) {
-            logger.debug('[MessageApi] getMsg failed:', err.message)
         }
-        return null
+        const parsedSeq = seq !== undefined && seq !== null && seq !== '' ? Number(seq) : undefined
+        const seqValue = Number.isFinite(parsedSeq) ? parsedSeq : undefined
+        if (!rawMsg && typeof bot?.getChatHistory === 'function' && useSeq && seqValue !== undefined) {
+            try {
+                const history = await bot.getChatHistory(seqValue, 1)
+                rawMsg = history?.find?.(msg => Number(msg.seq) === Number(seqValue)) || history?.[0] || null
+                source = 'bot.getChatHistory'
+            } catch (err) {
+                logger.debug('[MessageApi] bot.getChatHistory failed:', err.message)
+            }
+        }
+
+        const isGroup = !!(e.isGroup || groupId)
+        if (!rawMsg && isGroup) {
+            try {
+                const group = e.group || bot?.pickGroup?.(parseInt(groupId))
+                if (typeof group?.getMsg === 'function' && seqValue !== undefined) {
+                    rawMsg = await group.getMsg(seqValue)
+                    source = 'group.getMsg'
+                }
+                if (!rawMsg && typeof group?.getChatHistory === 'function' && seqValue !== undefined) {
+                    const history = await group.getChatHistory(seqValue, count)
+                    rawMsg =
+                        history?.find?.(msg => Number(msg.seq) === Number(seqValue)) ||
+                        history?.[history.length - 1] ||
+                        history?.[0]
+                    source = 'group.getChatHistory'
+                }
+            } catch (err) {
+                logger.debug('[MessageApi] group history fallback failed:', err.message)
+            }
+        }
+        if (!rawMsg && !isGroup && userId) {
+            try {
+                const friend = e.friend || bot?.pickUser?.(parseInt(userId)) || bot?.pickFriend?.(parseInt(userId))
+                if (
+                    typeof friend?.getChatHistory === 'function' &&
+                    time !== undefined &&
+                    time !== null &&
+                    time !== ''
+                ) {
+                    const timeValue = Number(time)
+                    if (Number.isFinite(timeValue)) {
+                        const history = await friend.getChatHistory(timeValue, count)
+                        rawMsg = history?.find?.(msg => Number(msg.time) === Number(timeValue)) || history?.[0]
+                        source = 'friend.getChatHistory'
+                    }
+                }
+            } catch (err) {
+                logger.debug('[MessageApi] private history fallback failed:', err.message)
+            }
+        }
+
+        if (!rawMsg) return null
+
+        const data = rawMsg.data || rawMsg
+        return {
+            message_id: data.message_id || rawMsg.message_id || messageId,
+            seq: data.seq || rawMsg.seq || data.message_seq || 0,
+            rand: data.rand || rawMsg.rand || 0,
+            time: data.time || rawMsg.time || 0,
+            user_id: data.user_id || data.sender?.user_id || rawMsg.user_id || 0,
+            sender: {
+                user_id: data.sender?.user_id || data.user_id || rawMsg.user_id || 0,
+                nickname: data.sender?.nickname || data.nickname || rawMsg.nickname || '',
+                card: data.sender?.card || data.card || rawMsg.card || '',
+                role: data.sender?.role || 'member',
+                uid: data.sender?.uid || data.uid || ''
+            },
+            group_id: data.group_id || rawMsg.group_id || groupId || '',
+            message: data.message || rawMsg.message || [],
+            raw_message: data.raw_message || rawMsg.raw_message || '',
+            _raw: rawMsg,
+            _source: source
+        }
     },
 
     /**
@@ -2483,11 +2521,10 @@ export const ProtobufUtils = {
     decode(buffer) {
         try {
             const pb = this.getPb()
-            if (pb?.decode) {
+            if (pb?.decodePb) {
                 return pb.decodePb(buffer)
             }
-            // 尝试使用 decode
-            if (pb?.decodePb) {
+            if (pb?.decode) {
                 return pb.decode(buffer)
             }
             return null
