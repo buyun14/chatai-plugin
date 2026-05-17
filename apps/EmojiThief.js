@@ -543,12 +543,112 @@ export class EmojiThief extends plugin {
             priority: 100,
             rule: [
                 {
+                    reg: '^(偷图|偷表情|保存这个|保存图片|存图|存表情|save|偷)$',
+                    fnc: 'manualSteal',
+                    log: false
+                },
+                {
                     reg: '',
                     fnc: 'collectAndTrigger',
                     log: false
                 }
             ]
         })
+    }
+
+    async manualSteal(e) {
+        if (!e.isGroup || !e.group_id) return false
+
+        const groupId = String(e.group_id)
+        const config = await emojiThiefService.getGroupConfig(groupId)
+        if (!config.enabled) {
+            await e.reply('本群未开启表情收集功能', true)
+            return true
+        }
+
+        let imageUrl = null
+
+        if (e.source || e.reply_id) {
+            try {
+                let quoteMsg = null
+                if (e.getReply) {
+                    quoteMsg = await e.getReply()
+                } else if (e.bot?.getMsg) {
+                    const msgId = e.source?.seq || e.source?.message_id || e.reply_id
+                    if (msgId) quoteMsg = await e.bot.getMsg(msgId)
+                }
+
+                if (quoteMsg) {
+                    const msgArr = quoteMsg.message || quoteMsg.content || []
+                    for (const seg of Array.isArray(msgArr) ? msgArr : []) {
+                        const type = seg.type || seg.data?.type
+                        if (type === 'image') {
+                            imageUrl = seg.url || seg.data?.url || seg.file || seg.data?.file
+                            break
+                        }
+                    }
+                }
+            } catch (err) {
+                logger.debug('[EmojiThief] 获取引用消息失败:', err.message)
+            }
+        }
+
+        if (!imageUrl) {
+            for (const seg of e.message) {
+                if (seg.type === 'image' && seg.url) {
+                    imageUrl = seg.url
+                    break
+                }
+            }
+        }
+
+        if (!imageUrl) {
+            await e.reply('请回复一张图片并说"偷图"，或者在消息中附带图片', true)
+            return true
+        }
+
+        try {
+            const emojiDir = emojiThiefService.getEmojiDir(groupId, config.separateFolder)
+            await fsp.mkdir(emojiDir, { recursive: true }).catch(() => {})
+            const dbPath = path.join(emojiDir, 'md5.json')
+            const md5Db = await emojiThiefService.readMd5Db(dbPath)
+
+            const resp = await axios.get(imageUrl, {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                headers: { Referer: 'https://qq.com', 'User-Agent': 'Mozilla/5.0' }
+            })
+            const buffer = Buffer.from(resp.data)
+            const md5 = crypto.createHash('md5').update(buffer).digest('hex')
+
+            if (md5Db.has(md5)) {
+                await e.reply('这张图已经存过了~', true)
+                return true
+            }
+
+            const files = await fsp.readdir(emojiDir).catch(() => [])
+            const count = files.filter(f => /\.(gif|png|jpg|jpeg|webp)$/i.test(f)).length
+            if (count >= (config.maxCount || 500)) {
+                await e.reply(`表情包已满(${count}张)，请先清理`, true)
+                return true
+            }
+
+            let ext = 'png'
+            if (buffer[0] === 0x47 && buffer[1] === 0x49) ext = 'gif'
+            else if (buffer[0] === 0xff && buffer[1] === 0xd8) ext = 'jpg'
+            else if (buffer[0] === 0x52 && buffer[1] === 0x49) ext = 'webp'
+
+            await fsp.writeFile(path.join(emojiDir, `${md5}.${ext}`), buffer)
+            md5Db.add(md5)
+            await emojiThiefService.writeMd5Db(dbPath, md5Db)
+
+            await e.reply(`已偷到! (${count + 1}/${config.maxCount})`, true)
+            return true
+        } catch (err) {
+            logger.warn('[EmojiThief] 人工偷图失败:', err.message)
+            await e.reply('偷图失败: ' + err.message, true)
+            return true
+        }
     }
 
     async collectAndTrigger(e) {

@@ -1377,7 +1377,9 @@ export class OpenAIClient extends AbstractClient {
                             finalUsage = {
                                 promptTokens: usage.input_tokens,
                                 completionTokens: usage.output_tokens,
-                                totalTokens: usage.total_tokens
+                                totalTokens: usage.total_tokens,
+                                cachedTokens: usage.input_tokens_details?.cached_tokens || 0,
+                                reasoningTokens: usage.output_tokens_details?.reasoning_tokens || 0
                             }
                         }
                         const converted = self.responsesOutputToChatCompletion(chunk.response || {})
@@ -1398,7 +1400,9 @@ export class OpenAIClient extends AbstractClient {
                     finalUsage = {
                         promptTokens: chunk.usage.prompt_tokens,
                         completionTokens: chunk.usage.completion_tokens,
-                        totalTokens: chunk.usage.total_tokens
+                        totalTokens: chunk.usage.total_tokens,
+                        cachedTokens: chunk.usage.prompt_tokens_details?.cached_tokens || 0,
+                        reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens || 0
                     }
                 }
 

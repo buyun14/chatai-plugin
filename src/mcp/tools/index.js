@@ -27,7 +27,8 @@ const toolModules = {
     bltools: { file: './bltools.js', export: 'bltoolsTools' },
     reminder: { file: './reminder.js', export: 'reminderTools' },
     imageGen: { file: './imageGen.js', export: 'imageGenTools' },
-    qzone: { file: './qzone.js', export: 'qzoneTools' }
+    qzone: { file: './qzone.js', export: 'qzoneTools' },
+    emoji: { file: './emoji.js', export: 'emojiTools' }
 }
 
 // 类别元信息
@@ -119,6 +120,11 @@ const categoryMeta = {
         name: 'QQ空间/说说',
         description: '发布/获取/点赞说说、个性签名、戳一戳。用户需要操作QQ空间时调用',
         icon: 'Star'
+    },
+    emoji: {
+        name: '表情包管理',
+        description: '保存表情包、发送已存表情、列出表情库。用户说"偷图""保存表情""发个表情""之前的图呢"时调用',
+        icon: 'Smile'
     }
 }
 

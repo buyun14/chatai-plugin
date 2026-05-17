@@ -488,7 +488,7 @@ export class ChannelManager {
         const src = advanced || {}
         return {
             streaming: {
-                enabled: src.streaming?.enabled || false,
+                enabled: src.streaming?.enabled !== false,
                 chunkSize: src.streaming?.chunkSize || 1024
             },
             thinking: {
@@ -755,7 +755,7 @@ export class ChannelManager {
         // 如果凭据或适配器类型变更，清除模型缓存
         if (updates.apiKey || updates.baseUrl || updates.baseUrls || updates.apiKeys || updates.adapterType) {
             channel.modelsCached = false
-            channel.status = undefined // Reset status when config changes
+            channel.status = ChannelStatus.IDLE
             await redisClient.del(`models:${id}`)
         }
 

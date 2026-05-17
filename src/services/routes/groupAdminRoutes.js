@@ -61,7 +61,7 @@ export function generateGroupAdminLoginCode(groupId, userId) {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // 排除易混淆字符
     let code = ''
     for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length))
+        code += chars.charAt(crypto.randomInt(0, chars.length))
     }
 
     const expiry = Date.now() + 5 * 60 * 1000 // 5分钟有效
@@ -208,10 +208,32 @@ function groupAdminAuth(req, res, next) {
 
 // ==================== 群管理员认证 ====================
 
+const loginAttempts = new Map() // IP -> { count, resetAt }
+function loginRateLimit(req, res, next) {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown'
+    const now = Date.now()
+    const entry = loginAttempts.get(ip)
+    if (entry && now < entry.resetAt) {
+        if (entry.count >= 5) {
+            return res.status(429).json(ChaiteResponse.fail(null, '登录尝试过于频繁，请稍后再试'))
+        }
+        entry.count++
+    } else {
+        loginAttempts.set(ip, { count: 1, resetAt: now + 60 * 1000 })
+    }
+    // 清理过期条目
+    if (loginAttempts.size > 1000) {
+        for (const [k, v] of loginAttempts) {
+            if (now > v.resetAt) loginAttempts.delete(k)
+        }
+    }
+    next()
+}
+
 /**
  * POST /api/group-admin/login - 群管理员登录（通过一次性登录码）
  */
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimit, async (req, res) => {
     try {
         const { code } = req.body
 
@@ -433,15 +455,15 @@ router.get('/config', groupAdminAuth, async (req, res) => {
                     maxTokens: settings.gameMaxTokens,
                     modelId: settings.gameModel
                 },
-                // 模型配置（不使用遗留字段回退，避免清除后仍显示旧值）
+                // 模型配置（从所有别名 key 中回退读取，确保兼容两个编辑器）
                 models: {
                     chat: settings.chatModel || '',
-                    tools: settings.toolModel || '',
+                    tools: settings.toolModel || settings.toolsModel || '',
                     dispatch: settings.dispatchModel || '',
-                    vision: settings.imageModel || '',
-                    image: settings.drawModel || '',
+                    vision: settings.imageModel || settings.visionModel || '',
+                    image: settings.drawModel || settings.imageGenModel || '',
                     search: settings.searchModel || '',
-                    bym: settings.roleplayModel || '',
+                    bym: settings.roleplayModel || settings.bymModel || '',
                     summary: settings.summaryModel || '',
                     profile: settings.profileModel || '',
                     game: settings.gameModel || ''
@@ -661,14 +683,18 @@ router.put('/config', groupAdminAuth, async (req, res) => {
             gameTemperature: body.game?.temperature,
             gameMaxTokens: body.game?.maxTokens,
             gameModel: body.models?.game,
-            // 模型
+            // 模型（同时写入所有别名 key，确保两个编辑器的设置互相兼容）
             chatModel: body.models?.chat,
             toolModel: body.models?.tools,
+            toolsModel: body.models?.tools,
             dispatchModel: body.models?.dispatch,
             imageModel: body.models?.vision,
+            visionModel: body.models?.vision,
             drawModel: body.models?.image,
+            imageGenModel: body.models?.image,
             searchModel: body.models?.search,
             roleplayModel: body.models?.bym,
+            bymModel: body.models?.bym,
             profileModel: body.models?.profile,
             // 黑白名单
             listMode: body.listMode,
@@ -981,22 +1007,29 @@ router.post('/models/fetch', groupAdminAuth, async (req, res) => {
 
         /* 检测掩码 apiKey 并从已有渠道配置中恢复完整 key */
         if (apiKey.startsWith('****')) {
+            const suffix = apiKey.slice(4)
             try {
                 const { groupId } = req.groupAdmin
                 const db = getDatabase()
                 const sm = getScopeManager(db)
                 await sm.init()
                 const channelConfig = await sm.getGroupChannelConfig(groupId)
-                /* 从遗留单渠道恢复 */
-                if (channelConfig?.apiKey && channelConfig.apiKey.endsWith(apiKey.slice(4))) {
+                /* 从遗留单渠道恢复（匹配 baseUrl + 后缀） */
+                if (
+                    channelConfig?.apiKey &&
+                    channelConfig.apiKey.endsWith(suffix) &&
+                    (!baseUrl || channelConfig.baseUrl === baseUrl)
+                ) {
                     apiKey = channelConfig.apiKey
                 }
-                /* 从多独立渠道恢复 */
-                const indChannels = channelConfig?.independentChannels || []
-                for (const ch of indChannels) {
-                    if (ch.apiKey && ch.apiKey.endsWith(apiKey.slice(4))) {
-                        apiKey = ch.apiKey
-                        break
+                /* 从多独立渠道恢复（匹配 baseUrl + 后缀） */
+                if (apiKey.startsWith('****')) {
+                    const indChannels = channelConfig?.independentChannels || []
+                    for (const ch of indChannels) {
+                        if (ch.apiKey && ch.apiKey.endsWith(suffix) && (!baseUrl || ch.baseUrl === baseUrl)) {
+                            apiKey = ch.apiKey
+                            break
+                        }
                     }
                 }
             } catch {

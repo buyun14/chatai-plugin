@@ -370,6 +370,61 @@ export async function parseUserMessage(e, options = {}) {
                     text += `[表情:${faceId}]`
                     break
                 }
+
+                case 'flash': {
+                    let flashUrl = getMediaUrl(segData, true) || val.url
+                    if (!flashUrl && segData.file_id && e.bot?.sendApi) {
+                        try {
+                            const fileInfo = await e.bot.sendApi('get_image', { file_id: segData.file_id })
+                            flashUrl = fileInfo?.data?.url || fileInfo?.url
+                        } catch {}
+                    }
+                    if (flashUrl) {
+                        try {
+                            if (isQQPicUrl(flashUrl)) {
+                                const imageData = await fetchImage(flashUrl)
+                                if (imageData) {
+                                    text += '[闪照] '
+                                    contents.push({
+                                        type: 'image',
+                                        image: imageData.base64,
+                                        mimeType: imageData.mimeType,
+                                        source: 'flash'
+                                    })
+                                } else {
+                                    text += '[闪照:图片获取失败]'
+                                }
+                            } else if (flashUrl.startsWith('http')) {
+                                text += '[闪照] '
+                                contents.push({
+                                    type: 'image_url',
+                                    image_url: { url: flashUrl },
+                                    source: 'flash'
+                                })
+                            } else {
+                                const imageData = await fetchImage(flashUrl)
+                                if (imageData) {
+                                    text += '[闪照] '
+                                    contents.push({
+                                        type: 'image',
+                                        image: imageData.base64,
+                                        mimeType: imageData.mimeType,
+                                        source: 'flash'
+                                    })
+                                } else {
+                                    text += '[闪照:图片获取失败]'
+                                }
+                            }
+                        } catch (err) {
+                            logger.debug('[MessageParser][Flash] 获取闪照失败:', err.message)
+                            text += '[闪照:图片获取失败]'
+                        }
+                    } else {
+                        text += '[闪照]'
+                    }
+                    break
+                }
+
                 case 'file': {
                     // 文件信息
                     const fileName = segData.name || val.name || segData.fid || val.fid || '未知文件'
@@ -677,6 +732,54 @@ export async function parseUserMessage(e, options = {}) {
                     // 天气
                     const city = segData.city || val.city || ''
                     text += `[天气${city ? ':' + city : ''}]`
+                    break
+                }
+
+                case 'sface': {
+                    const sfaceId = segData.id || val.id || ''
+                    const sfaceText = segData.text || val.text || ''
+                    text += sfaceText ? `[小表情:${sfaceText}]` : `[小表情:${sfaceId}]`
+                    break
+                }
+
+                case 'long_msg': {
+                    const resId = segData.id || segData.resid || val.id || ''
+                    if (resId && e.bot?.pickGroup?.(e.group_id)?.getForwardMsg) {
+                        try {
+                            const msgs = await e.bot.pickGroup(e.group_id).getForwardMsg(resId)
+                            if (msgs && msgs.length > 0) {
+                                const parts = []
+                                for (const node of msgs.slice(0, 20)) {
+                                    const nodeContent = node.message || node.content || []
+                                    let nodeText = ''
+                                    for (const elem of Array.isArray(nodeContent) ? nodeContent : [nodeContent]) {
+                                        if (typeof elem === 'string') {
+                                            nodeText += elem
+                                            continue
+                                        }
+                                        const t = elem.type || elem.data?.type
+                                        if (t === 'text') nodeText += elem.text || elem.data?.text || ''
+                                        else if (t === 'image') nodeText += '[图片]'
+                                        else if (t === 'face') nodeText += `[表情]`
+                                        else if (t) nodeText += `[${t}]`
+                                    }
+                                    if (nodeText.trim()) {
+                                        const sender = node.nickname || node.sender?.nickname || '未知'
+                                        parts.push(`${sender}: ${nodeText.trim()}`)
+                                    }
+                                }
+                                if (parts.length > 0) text += `[长消息]\n${parts.join('\n')}\n[/长消息]`
+                                else text += '[长消息:内容为空]'
+                            } else {
+                                text += `[长消息:${resId}]`
+                            }
+                        } catch (err) {
+                            logger.debug('[MessageParser][LongMsg] 获取长消息失败:', err.message)
+                            text += `[长消息:${resId}]`
+                        }
+                    } else {
+                        text += `[长消息${resId ? ':' + resId : ''}]`
+                    }
                     break
                 }
 

@@ -261,6 +261,9 @@ class StatsService {
         } = options
         let inputTokens = providedInputTokens
         let outputTokens = providedOutputTokens
+        let cacheReadTokens = 0
+        let cacheCreationTokens = 0
+        let reasoningTokens = 0
         let isEstimated = false
         if (apiUsage) {
             if (apiUsage.prompt_tokens !== undefined) {
@@ -278,6 +281,20 @@ class StatsService {
             } else if (apiUsage.output_tokens !== undefined) {
                 outputTokens = apiUsage.output_tokens
             }
+
+            cacheReadTokens =
+                apiUsage.cache_read_input_tokens ||
+                apiUsage.cachedTokens ||
+                apiUsage.cached_tokens ||
+                apiUsage.prompt_tokens_details?.cached_tokens ||
+                apiUsage.cachedContentTokenCount ||
+                0
+            cacheCreationTokens = apiUsage.cache_creation_input_tokens || apiUsage.cacheCreationTokens || 0
+            reasoningTokens =
+                apiUsage.completion_tokens_details?.reasoning_tokens ||
+                apiUsage.reasoning_tokens ||
+                apiUsage.reasoningTokens ||
+                0
         }
         if (inputTokens === undefined || inputTokens === null) {
             if (messages) {
@@ -339,6 +356,9 @@ class StatsService {
                 inputTokens,
                 outputTokens,
                 totalTokens,
+                cacheReadTokens,
+                cacheCreationTokens,
+                reasoningTokens,
                 duration,
                 success,
                 error,

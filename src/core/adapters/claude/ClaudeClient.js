@@ -192,7 +192,10 @@ export class ClaudeClient extends AbstractClient {
         const usage = {
             promptTokens: response.usage?.input_tokens,
             completionTokens: response.usage?.output_tokens,
-            totalTokens: (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0)
+            totalTokens: (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0),
+            cachedTokens: response.usage?.cache_read_input_tokens || 0,
+            cacheCreationTokens: response.usage?.cache_creation_input_tokens || 0,
+            reasoningTokens: 0
         }
 
         return {

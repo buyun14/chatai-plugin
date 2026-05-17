@@ -188,7 +188,9 @@ export class GeminiClient extends AbstractClient {
         const usage = {
             promptTokens: response.usageMetadata?.promptTokenCount,
             completionTokens: response.usageMetadata?.candidatesTokenCount,
-            totalTokens: response.usageMetadata?.totalTokenCount
+            totalTokens: response.usageMetadata?.totalTokenCount,
+            cachedTokens: response.usageMetadata?.cachedContentTokenCount || 0,
+            reasoningTokens: response.usageMetadata?.thoughtsTokenCount || 0
         }
 
         return {

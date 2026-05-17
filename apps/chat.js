@@ -717,6 +717,31 @@ export class Chat extends plugin {
                         }
                     }
 
+                    // 分段回复模式（非伪人模式也支持按句输出）
+                    if (!handled && replyTextContent) {
+                        const sentenceOutputCfg = config.get('output.sentenceOutput') || {}
+                        if (sentenceOutputCfg.enabled && sentenceOutputCfg.chatEnabled !== false) {
+                            const sentences = this.splitIntoSentences(replyTextContent)
+                            if (sentences.length > 1) {
+                                for (let i = 0; i < sentences.length; i++) {
+                                    const replyResult = await this.reply(sentences[i], i === 0 ? quoteReply : false)
+                                    if (i === 0) this.handleAutoRecall(replyResult, false)
+                                    if (i < sentences.length - 1) {
+                                        const delay =
+                                            sentenceOutputCfg.randomDelay !== false
+                                                ? (sentenceOutputCfg.minDelay || 500) +
+                                                  Math.random() *
+                                                      ((sentenceOutputCfg.maxDelay || 2000) -
+                                                          (sentenceOutputCfg.minDelay || 500))
+                                                : sentenceOutputCfg.minDelay || 500
+                                        await new Promise(r => setTimeout(r, delay))
+                                    }
+                                }
+                                handled = true
+                            }
+                        }
+                    }
+
                     // 默认直接输出
                     if (!handled) {
                         const replyResult = await this.reply(replyContent, quoteReply)
@@ -752,6 +777,32 @@ export class Chat extends plugin {
     /**
      * 格式化回复
      */
+    splitIntoSentences(text) {
+        if (!text) return []
+        const lines = text.split(/\n+/)
+        const sentences = []
+        for (const line of lines) {
+            if (!line.trim()) continue
+            const parts = line.split(/(?<=[。！？!?.…])\s*/)
+            for (const part of parts) {
+                const trimmed = part.trim()
+                if (trimmed) sentences.push(trimmed)
+            }
+        }
+        const merged = []
+        let buffer = ''
+        for (const s of sentences) {
+            if (buffer.length + s.length < 20 && buffer) {
+                buffer += s
+            } else {
+                if (buffer) merged.push(buffer)
+                buffer = s
+            }
+        }
+        if (buffer) merged.push(buffer)
+        return merged
+    }
+
     formatReply(response) {
         if (!response || !Array.isArray(response)) return null
         const messages = []

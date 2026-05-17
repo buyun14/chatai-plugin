@@ -191,8 +191,10 @@ class RequestSignatureValidator {
         const fullPath = (req.originalUrl || req.path).split('?')[0]
         const expectedSignature = this.generateSignature(req.method, fullPath, timestamp, bodyHash, nonce)
 
-        // 签名验证 - 使用简单字符串比较
-        if (signature !== expectedSignature) {
+        // 签名验证 - 使用时序安全比较防止时序攻击
+        const sigBuf = Buffer.from(signature)
+        const expBuf = Buffer.from(expectedSignature)
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
             chatLogger.warn(`[Auth] 签名不匹配:`)
             chatLogger.warn(`  收到: ${signature}`)
             chatLogger.warn(`  期望: ${expectedSignature}`)

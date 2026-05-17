@@ -711,6 +711,28 @@ export function parseMessageContent(message) {
             case 'poke':
                 parts.push('[戳一戳]')
                 break
+            case 'flash':
+                parts.push('[闪照]')
+                msgType = 'image'
+                break
+            case 'sface':
+                parts.push(`[小表情${data.text || data.id || ''}]`)
+                break
+            case 'bface':
+                parts.push('[原创表情]')
+                break
+            case 'long_msg':
+                parts.push('[长消息]')
+                break
+            case 'location':
+                parts.push(`[位置${data.name || data.address || ''}]`)
+                break
+            case 'share':
+                parts.push(`[链接${data.title ? ': ' + data.title : ''}]`)
+                break
+            case 'music':
+                parts.push(`[音乐${data.title ? ': ' + data.title : ''}]`)
+                break
             default:
                 if (data.text) parts.push(data.text)
                 else if (type) parts.push(`[${type}]`)
