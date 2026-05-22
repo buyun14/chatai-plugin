@@ -16,7 +16,7 @@
 10. [附录](#附录)
 
 ## 简介
-本文件档详细说明了数据存储 API 的完整规范，涵盖用户记忆、知识库和配置数据的管理接口。文档基于实际代码实现，提供数据模型、字段定义、约束条件、备份恢复迁移接口、导入导出和批量操作的使用示例，以及数据安全、权限控制和访问审计的接口说明。
+本文档详细说明了数据存储 API 的完整规范，涵盖用户记忆、知识库和配置数据的管理接口。文档基于实际代码实现，提供数据模型、字段定义、约束条件、备份恢复迁移接口、导入导出和批量操作的使用示例，以及数据安全、权限控制和访问审计的接口说明。
 
 ## 项目结构
 数据存储相关的核心文件位于 `src/services/storage/` 目录，API 路由位于 `src/services/routes/` 目录，配置管理位于 `config/` 目录，知识库存储位于 `data/knowledge/` 目录。
@@ -235,9 +235,10 @@ Route-->>Client : JSON 响应
 - **POST /knowledge/:id/link/:presetId** - 将知识库关联到预设
 - **DELETE /knowledge/:id/link/:presetId** - 取消知识库与预设的关联
 
-#### 知识库导入导出
+#### 知识库导入
 - **POST /knowledge/import** - 导入知识库数据
-- **POST /knowledge/export** - 导出知识库数据
+
+当前路由未提供 `/knowledge/export` 接口；如需导出，可直接备份 `data/knowledge` 或后续扩展导出接口。
 
 ```mermaid
 flowchart TD

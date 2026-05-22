@@ -75,10 +75,10 @@ chatai-plugin/
 ├── src/                       # 源代码
 │   ├── core/                 # 核心模块
 │   │   ├── adapters/         # LLM 适配器
-│   │   │   ├── BaseAdapter.js
-│   │   │   ├── OpenAIAdapter.js
-│   │   │   ├── GeminiAdapter.js
-│   │   │   ├── ClaudeAdapter.js
+│   │   │   ├── AbstractClient.js
+│   │   │   ├── openai/OpenAIClient.js
+│   │   │   ├── gemini/GeminiClient.js
+│   │   │   ├── claude/ClaudeClient.js
 │   │   │   └── ...
 │   │   ├── cache/            # 缓存管理
 │   │   │   └── RedisClient.js
@@ -164,110 +164,74 @@ chatai-plugin/
 
 ### LLM 适配器
 
-适配器位于 `src/core/adapters/`，负责与不同 LLM 提供商的 API 通信。
+适配器位于 `src/core/adapters/`，当前实现以 `AbstractClient.js` 为基类，并按厂商拆分到子目录，例如 `openai/OpenAIClient.js`、`gemini/GeminiClient.js`、`claude/ClaudeClient.js`。
 
 #### 基类结构
 
 ```javascript
-// src/core/adapters/BaseAdapter.js
-export class BaseAdapter {
-    constructor(config) {
+// src/core/adapters/AbstractClient.js
+export class AbstractClient {
+    constructor(config = {}) {
         this.config = config
-        this.name = 'base'
+        this.name = 'abstract'
     }
 
-    // 发送聊天请求
     async chat(messages, options = {}) {
-        throw new Error('Not implemented')
+        throw new Error('chat() must be implemented')
     }
 
-    // 流式聊天
     async *chatStream(messages, options = {}) {
-        throw new Error('Not implemented')
+        throw new Error('chatStream() must be implemented')
     }
 
-    // 获取可用模型列表
-    async listModels() {
+    async models() {
         return []
-    }
-
-    // 测试连接
-    async testConnection() {
-        return { success: false, error: 'Not implemented' }
     }
 }
 ```
 
 #### 添加新适配器
 
-1. 在 `src/core/adapters/` 创建新文件：
+1. 在 `src/core/adapters/<provider>/` 下创建新的 Client 文件，并继承 `AbstractClient`：
 
 ```javascript
-// src/core/adapters/NewProviderAdapter.js
-import { BaseAdapter } from './BaseAdapter.js'
+// src/core/adapters/newprovider/NewProviderClient.js
+import { AbstractClient } from '../AbstractClient.js'
 
-export class NewProviderAdapter extends BaseAdapter {
-    constructor(config) {
+export class NewProviderClient extends AbstractClient {
+    constructor(config = {}) {
         super(config)
         this.name = 'newprovider'
-        this.client = new NewProviderSDK({
-            apiKey: config.apiKey,
-            baseURL: config.baseUrl
-        })
     }
 
     async chat(messages, options = {}) {
-        const response = await this.client.chat({
-            model: options.model || this.config.defaultModel,
-            messages: this.formatMessages(messages),
-            temperature: options.temperature,
-            max_tokens: options.maxTokens
-        })
-        
+        // 调用厂商 SDK 或 HTTP API，并转换为项目统一响应格式
         return {
-            content: response.choices[0].message.content,
-            usage: response.usage,
-            model: response.model
+            content: 'response text',
+            usage: {},
+            model: options.model || this.config.defaultModel
         }
     }
 
     async *chatStream(messages, options = {}) {
-        const stream = await this.client.chat({
-            model: options.model,
-            messages: this.formatMessages(messages),
-            stream: true
-        })
-
-        for await (const chunk of stream) {
-            yield {
-                content: chunk.choices[0]?.delta?.content || '',
-                done: chunk.choices[0]?.finish_reason === 'stop'
-            }
-        }
+        // 按项目现有流式响应约定 yield 分片
+        yield { content: 'partial', done: false }
+        yield { content: '', done: true }
     }
 
-    formatMessages(messages) {
-        // 转换消息格式
-        return messages.map(m => ({
-            role: m.role,
-            content: m.content
-        }))
+    async models() {
+        return []
     }
 }
 ```
 
-2. 在 `src/core/adapters/index.js` 注册：
+2. 在 `src/core/adapters/index.js` 中导出新客户端，让上层服务可以引用：
 
 ```javascript
-import { NewProviderAdapter } from './NewProviderAdapter.js'
-
-export const adapters = {
-    openai: OpenAIAdapter,
-    gemini: GeminiAdapter,
-    claude: ClaudeAdapter,
-    newprovider: NewProviderAdapter  // 添加新适配器
-}
+export { NewProviderClient } from './newprovider/NewProviderClient.js'
 ```
+
+3. 如需在配置和渠道管理中可选，还需要同步更新渠道/模型配置、前端选项和相关服务中的 provider 映射。
 
 ### 缓存系统
 
@@ -467,19 +431,20 @@ export const basicTools = [
 ]
 ```
 
-2. 如果是新类别，在 `index.js` 中注册：
+2. 如果是新类别，在 `src/mcp/tools/index.js` 中注册模块和类别元信息：
 
 ```javascript
-// src/mcp/tools/index.js
-import { newTools } from './new.js'
+const toolModules = {
+    // ...现有类别
+    new: { file: './new.js', export: 'newTools' }
+}
 
-export const toolCategories = {
-    // ... 现有类别
+const categoryMeta = {
+    // ...现有类别元信息
     new: {
         name: '新类别',
         description: '类别描述',
-        icon: 'IconName',
-        tools: newTools
+        icon: 'IconName'
     }
 }
 ```

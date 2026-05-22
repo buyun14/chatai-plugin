@@ -340,7 +340,7 @@ await agent.init()
 | 方法类型 | 用途 | 示例 |
 |----------|------|------|
 | 静态方法 | MCP 服务器管理，无需上下文 | `SkillsAgent.getMcpServers()` |
-| 实例方法 | 工具执行，需要用户上下文 | `agent.execute('get_time', {})` |
+| 实例方法 | 工具执行，需要用户上下文 | `agent.execute('get_current_time', {})` |
 
 ```javascript
 // 静态方法 - 管理操作
@@ -349,7 +349,7 @@ await SkillsAgent.connectMcpServer('my-server', config)
 await SkillsAgent.reloadAllTools()
 
 // 实例方法 - 执行操作
-const result = await agent.execute('send_message', { text: 'Hello' })
+const result = await agent.execute('send_group_message', { group_id: '123456', message: 'Hello' })
 const skills = agent.getSkillsByCategory('message')
 ```
 
@@ -583,7 +583,7 @@ McpManager.callTool()
 | [自定义工具开发](content/工具调用系统/自定义工具开发.md) | 工具开发完整指南 |
 | [工具安全控制](content/工具调用系统/工具安全控制.md) | 权限与安全策略 |
 | [工具监控与调试](content/工具调用系统/工具监控与调试.md) | 调试与监控方法 |
-| [内置工具管理](content/工具调用系统/内置工具管理/) | 各类内置工具详解（14个子文档） |
+| [内置工具管理](content/工具调用系统/内置工具管理/) | 各类内置工具详解（按专题组织） |
 
 #### 配置管理
 | 文档 | 说明 |

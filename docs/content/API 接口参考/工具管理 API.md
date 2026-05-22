@@ -218,14 +218,11 @@ sequenceDiagram
 participant Client as "客户端"
 participant API as "工具路由"
 participant Manager as "MCP 管理器"
-participant Filter as "工具过滤器"
 participant Server as "MCP 服务器"
 participant Stats as "统计服务"
 Client->>API : POST /api/tools/test
 API->>Manager : callTool(toolName, args)
-Manager->>Filter : 检查工具访问权限
-Filter-->>Manager : 返回权限检查结果
-Manager->>Manager : 危险工具拦截检查
+Manager->>Manager : 检查工具存在性与危险工具拦截
 Manager->>Server : 执行工具调用
 Server-->>Manager : 返回执行结果
 Manager->>Stats : 记录调用日志
@@ -243,33 +240,24 @@ Stats-->>Manager : 确认错误记录
 
 #### 工具权限管理
 
-系统实现了多层次的权限控制机制：
+工具相关接口分为“管理配置”和“测试执行”两类：
 
-**权限层级：**
-1. **预设级别权限**：基于预设配置的工具访问控制
-2. **用户角色权限**：基于用户角色的工具使用权限
-3. **危险工具防护**：危险操作的二次确认机制
-4. **参数安全验证**：工具调用参数的安全检查
+- 管理配置接口受 Web 登录态和路由鉴权保护。
+- `POST /api/tools/test` 当前用于管理面板测试工具，会调用 `McpManager.callTool(toolName, args)`；执行链路会检查工具是否存在，并执行危险工具拦截，但不会自动套用聊天预设中的 `allowedTools` / `disabledTools` 或用户角色过滤。
+- 聊天中的工具调用权限由 Skills Agent、工具过滤服务和权限服务在对话链路中处理。
 
-**权限检查流程：**
+**管理面板测试执行流程：**
 ```mermaid
 flowchart TD
-Start([工具调用请求]) --> CheckPreset[检查预设权限]
-CheckPreset --> PresetAllowed{预设允许?}
-PresetAllowed --> |否| Deny1[拒绝访问]
-PresetAllowed --> |是| CheckRole[检查用户角色]
-CheckRole --> RoleAllowed{角色允许?}
-RoleAllowed --> |否| Deny2[拒绝访问]
-RoleAllowed --> |是| CheckDanger[检查危险工具]
-CheckDanger --> IsDanger{是否危险工具?}
-IsDanger --> |是| ConfirmDanger[危险工具确认]
-IsDanger --> |否| CheckParam[检查参数安全]
-ConfirmDanger --> DangerAllowed{确认允许?}
-DangerAllowed --> |否| Deny3[拒绝访问]
-DangerAllowed --> |是| CheckParam
-CheckParam --> ParamValid{参数有效?}
-ParamValid --> |否| Deny4[拒绝访问]
-ParamValid --> |是| Allow[允许访问]
+Start([POST /api/tools/test]) --> Auth[Web 路由鉴权]
+Auth --> Call[McpManager.callTool]
+Call --> Exists{工具存在?}
+Exists --> |否| Deny1[返回错误]
+Exists --> |是| Danger{危险工具拦截?}
+Danger --> |未通过| Deny2[拒绝执行]
+Danger --> |通过| Execute[执行工具]
+Execute --> Log[记录日志/统计]
+Log --> Return[返回结果]
 ```
 
 **图表来源**
@@ -604,7 +592,7 @@ await toolsApi.updateBuiltinConfig({
 await toolsApi.toggleCategory('basic', true);
 
 // 切换单个工具启用状态
-await toolsApi.toggleTool('get_time', true);
+await toolsApi.toggleTool('get_current_time', true);
 ```
 
 #### 自定义工具管理
@@ -637,7 +625,7 @@ await toolsApi.updateJs('hello_tool', {
 ```javascript
 // 测试工具执行
 const result = await toolsApi.test({
-  toolName: 'get_time',
+  toolName: 'get_current_time',
   arguments: {}
 });
 

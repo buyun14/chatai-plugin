@@ -624,6 +624,8 @@ export default {
 
 ## 内置工具列表
 
+当前内置工具由 `src/mcp/tools/index.js` 中的 22 个类别模块动态加载。下面列出常用工具；完整列表以源码和 Web 管理面板的工具列表为准。
+
 ### 基础工具 (basic)
 | 工具名 | 说明 |
 |--------|------|
@@ -643,6 +645,9 @@ export default {
 | `get_user_info` | 获取用户信息 |
 | `get_friend_list` | 获取好友列表 |
 | `send_like` | 给好友点赞 |
+| `get_avatar` | 获取头像 |
+| `search_friend` | 搜索好友 |
+| `check_is_friend` | 检查好友关系 |
 
 ### 群组信息 (group)
 | 工具名 | 说明 |
@@ -651,80 +656,77 @@ export default {
 | `get_group_list` | 获取群列表 |
 | `get_group_member_list` | 获取群成员列表 |
 | `get_group_member_info` | 获取群成员详情 |
+| `get_group_admins` | 获取群管理员 |
+| `search_group_member` | 搜索群成员 |
+| `get_group_notice` | 获取群公告 |
+| `check_in_group` | 检查是否在群内 |
+| `search_group` | 搜索群 |
 
 ### 消息操作 (message)
 | 工具名 | 说明 |
 |--------|------|
-| `send_private_message` | 发送私聊消息 |
-| `send_group_message` | 发送群消息 |
-| `reply_current_message` | 回复当前消息 |
-| `at_user` | @用户 |
-| `random_at_members` | 随机@群成员 |
-| `make_forward_message` | 发送合并转发 |
-| `get_chat_history` | 获取聊天记录 |
+| `send_to_master` | 发送私聊消息给主人 |
+| `get_master_info` | 获取主人信息列表 |
+| `send_private_message` | 发送私聊消息，非好友时可尝试群临时会话 |
+| `send_group_message` | 发送群消息，可附带 @ 和图片 |
+| `reply_current_message` | 回复当前消息，自动判断群聊/私聊 |
+| `at_user` | @指定用户、发送者、群主或全体成员 |
+| `at_role` | 按成员角色随机 @ 群成员 |
+| `random_at` | 随机 @ 群成员 |
+| `get_chat_history` | 获取聊天记录，支持 message_id、群 seq、私聊时间戳 |
+| `get_msg` | 获取消息详情，支持多协议回退 |
+| `recall_message` | 撤回消息 |
+| `get_forward_msg` | 获取合并转发消息内容 |
+| `deep_parse_message` | 深度解析消息或合并转发 |
+| `send_forward_msg` | 发送合并转发消息 |
+| `make_forward_msg` | 构造合并转发节点 |
+| `send_raw_message` | 发送原始消息段数组 |
+| `call_api` | 直接调用 OneBot/NapCat API |
+| `send_protocol_packet` | 发送 Protobuf/OIDB/Uni/SSO 协议包 |
+| `send_pb_message` | `send_protocol_packet` 的兼容别名 |
+| `decode_protobuf` | 解码 base64 Protobuf 数据 |
+| `get_message_record` | 获取消息完整记录数据 |
 
 ### 群管理 (admin)
 | 工具名 | 说明 |
 |--------|------|
-| `set_group_card` | 设置群名片 |
 | `mute_member` | 禁言成员 |
 | `kick_member` | 踢出成员 |
-| `recall_message` | 撤回消息 |
-| `set_group_admin` | 设置管理员 |
+| `set_group_card` | 设置群名片 |
 | `set_group_whole_ban` | 全群禁言 |
+| `set_group_admin` | 设置管理员 |
+| `set_group_name` | 设置群名 |
+| `set_group_special_title` | 设置群专属头衔 |
+| `send_group_notice` | 发送群公告 |
+| `delete_group_notice` | 删除群公告 |
 
-### 媒体处理 (media)
-| 工具名 | 说明 |
-|--------|------|
-| `parse_image` | 解析图片 |
-| `send_image` | 发送图片 |
-| `parse_video` | 解析视频 |
-| `send_video` | 发送视频 |
-| `get_avatar` | 获取头像 |
-| `image_ocr` | 图片文字识别 |
-| `generate_qrcode` | 生成二维码 |
+### 文件、媒体与搜索
+| 类别 | 常用工具 |
+|------|----------|
+| `file` | `get_group_files`, `get_file_url`, `upload_group_file`, `download_file`, `read_file`, `write_file`, `list_directory` |
+| `media` | `parse_image`, `generate_qrcode`, `send_image`, `send_video`, `send_music`, `send_location`, `send_markdown`, `send_button` |
+| `web` | `website`, `fetch_url` |
+| `search` | `bing_search`, `web_search`, `search_wiki`, `translate`, `get_weather`, `get_hot_search` |
 
-### 网页访问 (web)
-| 工具名 | 说明 |
-|--------|------|
-| `website` | 访问网页获取内容 |
-| `fetch_url` | 获取URL内容 |
+### 实用、记忆、上下文与 Bot 信息
+| 类别 | 常用工具 |
+|------|----------|
+| `utils` | `calculate`, `random_number`, `uuid`, `hash`, `base64_encode`, `base64_decode`, `url_encode`, `json_format` |
+| `memory` | `save_user_memory`, `get_user_memories`, `search_user_memory`, `delete_user_memory`, `update_user_memory` |
+| `context` | `get_current_context`, `get_conversation_context`, `clear_conversation`, `get_reply_message`, `get_at_members`, `get_group_context` |
+| `bot` | `get_login_info`, `get_bot_status`, `get_version_info`, `get_online_clients`, `get_self_info` |
 
-### 搜索工具 (search)
-| 工具名 | 说明 |
-|--------|------|
-| `web_search` | 网页搜索 |
-| `search_wiki` | 维基百科搜索 |
-| `translate` | 文本翻译 |
-
-### 实用工具 (utils)
-| 工具名 | 说明 |
-|--------|------|
-| `calculate` | 数学计算 |
-| `encode_decode` | 编码转换 |
-| `hash` | 哈希计算 |
-| `uuid` | 生成UUID |
-
-### 记忆管理 (memory)
-| 工具名 | 说明 |
-|--------|------|
-| `get_memories` | 获取用户记忆 |
-| `add_memory` | 添加记忆 |
-| `search_memories` | 搜索记忆 |
-| `delete_memory` | 删除记忆 |
-
-### 上下文管理 (context)
-| 工具名 | 说明 |
-|--------|------|
-| `get_current_context` | 获取当前上下文 |
-| `get_group_context` | 获取群聊上下文 |
-| `clear_context` | 清除上下文 |
-
-### 语音工具 (voice)
-| 工具名 | 说明 |
-|--------|------|
-| `text_to_speech` | 文字转语音 |
-| `ai_voice_chat` | AI语音对话 |
+### 语音、定时和扩展类别
+| 类别 | 常用工具 |
+|------|----------|
+| `voice` | `set_ai_voice_chat`, `get_ai_voice_characters`, `send_ai_voice`, `send_tts`, `voice_to_text`, `get_ai_voice_status` |
+| `schedule` | `schedule_task`, `cancel_scheduled_task`, `list_my_scheduled_tasks` |
+| `reminder` | `set_reminder`, `list_reminders`, `cancel_reminder` |
+| `groupStats` | `get_dragon_king`, `get_speak_rank`, `get_group_data`, `get_group_honor`, `get_random_group_member` |
+| `bltools` | `search_music_qq`, `search_emoji`, `bilibili_search`, `github_repo_info`, `ai_image_edit` |
+| `imageGen` | `generate_image`, `generate_video`, `list_image_presets`, `use_image_preset` |
+| `qzone` | `publish_qzone_mood`, `get_qzone_feeds`, `like_qzone_post`, `set_self_longnick`, `group_poke` |
+| `shell` | `execute_command`, `get_system_info`, `get_process_info`, `read_env` |
 
 ---
 
@@ -748,7 +750,7 @@ export default {
 **方式二：API 调用**
 ```javascript
 // 调用重载 API
-fetch('/api/tools/reload', { method: 'POST' })
+fetch('/api/tools/reload-all', { method: 'POST' })
 ```
 
 **方式三：代码中重载**
@@ -929,7 +931,7 @@ name: 'plugin_xxx_action'
 
 // ❌ 避免的命名（可能与内置冲突）
 name: 'get_weather'
-name: 'send_message'
+name: 'send_group_message'
 ```
 
 ### AI 调用问题
@@ -1743,16 +1745,17 @@ mcp:
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/tools` | GET | 获取所有工具 |
+| `/api/tools/list` | GET | 获取所有工具 |
 | `/api/tools/test` | POST | 测试工具执行 |
-| `/api/tools/categories` | GET | 获取工具分类 |
-| `/api/tools/categories/:key/toggle` | POST | 切换分类启用状态 |
+| `/api/tools/builtin/categories` | GET | 获取工具分类 |
+| `/api/tools/builtin/category/toggle` | POST | 切换分类启用状态 |
+| `/api/tools/builtin/tool/toggle` | POST | 切换单个工具启用状态 |
 | `/api/tools/builtin/config` | GET/PUT | 内置工具配置 |
 | `/api/tools/js` | GET | 获取 JS 工具列表 |
 | `/api/tools/js` | POST | 创建 JS 工具 |
 | `/api/tools/js/:name` | PUT | 更新 JS 工具 |
 | `/api/tools/js/:name` | DELETE | 删除 JS 工具 |
-| `/api/tools/reload` | POST | 重载所有工具 |
+| `/api/tools/reload-all` | POST | 重载所有工具 |
 
 ### 示例：添加 MCP 服务器
 
@@ -1836,7 +1839,7 @@ const response = await fetch('/api/tools/test', {
 | [自定义工具开发](content/工具调用系统/自定义工具开发.md) | 工具开发完整教程 |
 | [工具安全控制](content/工具调用系统/工具安全控制.md) | 权限过滤与安全策略 |
 | [工具监控与调试](content/工具调用系统/工具监控与调试.md) | 调试方法与日志分析 |
-| [内置工具管理](content/工具调用系统/内置工具管理/) | 各类内置工具详解（14个子文档） |
+| [内置工具管理](content/工具调用系统/内置工具管理/) | 各类内置工具详解（按专题组织） |
 
 ### 外部资源
 

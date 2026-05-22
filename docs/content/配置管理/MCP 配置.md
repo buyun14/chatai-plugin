@@ -150,7 +150,7 @@ Manager-->>Routes : "执行结果/日志"
 - 工具发现
   - 连接成功后，McpClient 调用 listTools/listResources/listPrompts 并由 McpManager 注册到内存。
 - 配置持久化
-  - 服务器配置保存在 data/mcp-servers.json，支持导入/导出与批量添加。
+  - 服务器配置保存在 data/mcp-servers.json，当前管理接口支持导入和批量添加；导出可通过备份该 JSON 文件完成。
 
 章节来源
 - [config.js](file://config/config.js#L268-L270)
@@ -356,7 +356,7 @@ ToolFilterService --> Config : "读取配置"
   - GET /servers/:name/tools 检查工具列表；GET /resources 与 /prompts 检查资源与提示词。
 - 管理与维护
   - 使用 /servers/:name/reconnect 重连；PUT /servers/:name 更新配置；DELETE /servers/:name 删除。
-  - 通过 /import 批量导入；通过 /export 导出当前配置（可扩展）。
+  - 通过 /import 批量导入；如需导出当前配置，可备份 data/mcp-servers.json 或后续扩展导出接口。
 
 章节来源
 - [config.js](file://config/config.js#L268-L270)

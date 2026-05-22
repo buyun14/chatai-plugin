@@ -57,7 +57,7 @@ Types --> Form
 - [BuiltinMcpServer.js](file://src/mcp/BuiltinMcpServer.js#L218-L1462)
 - [tools/index.js](file://src/mcp/tools/index.js#L1-L181)
 - [mcpRoutes.js](file://src/services/routes/mcpRoutes.js#L1-L249)
-- [mcp.ts](file://frontend/types/mcp.ts#L1-L530)
+- [mcp.ts](file://frontend/lib/types.ts#L1-L530)
 - [ServerConfigForm.tsx](file://frontend/components/mcp/ServerConfigForm.tsx#L1-L348)
 - [mcp-servers.json](file://data/mcp-servers.json#L1-L8)
 - [example_tool.js](file://data/tools/example_tool.js#L1-L43)
@@ -68,7 +68,7 @@ Types --> Form
 - [BuiltinMcpServer.js](file://src/mcp/BuiltinMcpServer.js#L1-L1462)
 - [tools/index.js](file://src/mcp/tools/index.js#L1-L181)
 - [mcpRoutes.js](file://src/services/routes/mcpRoutes.js#L1-L249)
-- [mcp.ts](file://frontend/types/mcp.ts#L1-L530)
+- [mcp.ts](file://frontend/lib/types.ts#L1-L530)
 - [ServerConfigForm.tsx](file://frontend/components/mcp/ServerConfigForm.tsx#L1-L348)
 - [mcp-servers.json](file://data/mcp-servers.json#L1-L8)
 - [example_tool.js](file://data/tools/example_tool.js#L1-L43)
@@ -87,7 +87,7 @@ Types --> Form
 - [BuiltinMcpServer.js](file://src/mcp/BuiltinMcpServer.js#L218-L1462)
 - [tools/index.js](file://src/mcp/tools/index.js#L1-L181)
 - [mcpRoutes.js](file://src/services/routes/mcpRoutes.js#L1-L249)
-- [mcp.ts](file://frontend/types/mcp.ts#L1-L530)
+- [mcp.ts](file://frontend/lib/types.ts#L1-L530)
 - [ServerConfigForm.tsx](file://frontend/components/mcp/ServerConfigForm.tsx#L1-L348)
 
 ## 架构总览
@@ -264,7 +264,7 @@ BLS-->>MGR : 格式化结果
 - 配置表单：ServerConfigForm.tsx 提供可视化配置，支持类型选择、字段校验与 JSON 格式校验
 
 章节来源
-- [mcp.ts](file://frontend/types/mcp.ts#L1-L530)
+- [mcp.ts](file://frontend/lib/types.ts#L1-L530)
 - [ServerConfigForm.tsx](file://frontend/components/mcp/ServerConfigForm.tsx#L1-L348)
 
 ## 依赖关系分析
@@ -289,7 +289,7 @@ CustomTools["data/tools/*.js"] --> Builtin
 - [McpManager.js](file://src/mcp/McpManager.js#L7-L8)
 - [BuiltinMcpServer.js](file://src/mcp/BuiltinMcpServer.js#L10-L18)
 - [mcpRoutes.js](file://src/services/routes/mcpRoutes.js#L6-L6)
-- [mcp.ts](file://frontend/types/mcp.ts#L1-L530)
+- [mcp.ts](file://frontend/lib/types.ts#L1-L530)
 - [ServerConfigForm.tsx](file://frontend/components/mcp/ServerConfigForm.tsx#L1-L348)
 - [mcp-servers.json](file://data/mcp-servers.json#L1-L8)
 - [example_tool.js](file://data/tools/example_tool.js#L1-L43)
