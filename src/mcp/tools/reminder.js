@@ -5,6 +5,7 @@
  */
 
 import schedule from 'node-schedule'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 
 /** @type {Map<string, {job: schedule.Job, info: Object}>} */
 const reminders = new Map()

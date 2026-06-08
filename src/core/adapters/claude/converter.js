@@ -4,6 +4,18 @@ import {
     registerFromChaiteToolConverter,
     registerIntoChaiteConverter
 } from '../../utils/converter.js'
+import { toClaudeTool } from '../tooling.js'
+
+function parseToolInput(input) {
+    if (input === undefined || input === null) return {}
+    if (typeof input !== 'string') return input
+    try {
+        const parsed = JSON.parse(input)
+        return parsed && typeof parsed === 'object' ? parsed : { value: parsed }
+    } catch {
+        return { input }
+    }
+}
 
 /**
  * Convert Chaite IMessage to Claude format
@@ -31,7 +43,7 @@ registerFromChaiteConverter('claude', source => {
                         type: 'tool_use',
                         id: toolCall.id,
                         name: toolCall.function.name,
-                        input: toolCall.function.arguments
+                        input: parseToolInput(toolCall.function.arguments)
                     })
                 }
             }
@@ -154,11 +166,7 @@ registerIntoChaiteConverter('claude', response => {
  * Convert Chaite Tool to Claude format
  */
 registerFromChaiteToolConverter('claude', tool => {
-    return {
-        name: tool.function.name,
-        description: tool.function.description,
-        input_schema: tool.function.parameters
-    }
+    return toClaudeTool(tool)
 })
 
 export {}

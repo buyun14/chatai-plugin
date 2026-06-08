@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { randomUUID } from 'crypto'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 
 /**
  * 语音消息工具

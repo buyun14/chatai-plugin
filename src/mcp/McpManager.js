@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import config from '../../config/config.js'
 import { McpClient } from './McpClient.js'
 import { builtinMcpServer, setBuiltinToolContext } from './BuiltinMcpServer.js'
+import { getToolIdentity as getAdapterToolIdentity } from '../core/adapters/tooling.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -46,6 +47,8 @@ export class McpManager {
     constructor() {
         /** @type {Map<string, Object>} 工具名称 -> 工具定义 */
         this.tools = new Map()
+        /** @type {Map<string, Object>} 工具身份(server:name) -> 工具定义 */
+        this.toolIdentities = new Map()
         /** @type {Map<string, Object>} 服务器名称 -> 服务器信息 */
         this.servers = new Map()
         /** @type {Map<string, Object>} 资源URI -> 资源信息 */
@@ -201,6 +204,7 @@ export class McpManager {
 
         // 清除所有状态
         this.tools.clear()
+        this.toolIdentities.clear()
         this.servers.clear()
         this.resources.clear()
         this.prompts.clear()
@@ -236,12 +240,13 @@ export class McpManager {
             const builtinTools = allTools.filter(t => !t.isJsTool)
 
             for (const tool of builtinTools) {
-                this.tools.set(tool.name, {
+                const normalizedTool = this.withToolSourceMeta({
                     ...tool,
                     serverName: 'builtin',
                     isBuiltin: !tool.isCustom,
                     isCustom: tool.isCustom || false
                 })
+                this.registerTool(normalizedTool)
             }
             this.servers.set('builtin', {
                 status: 'connected',
@@ -267,12 +272,14 @@ export class McpManager {
                 return
             }
             for (const tool of jsTools) {
-                this.tools.set(tool.name, {
+                const normalizedTool = this.withToolSourceMeta({
                     ...tool,
                     serverName: 'custom-tools',
                     isBuiltin: false,
-                    isJsTool: true
+                    isJsTool: true,
+                    isCustom: true
                 })
+                this.registerTool(normalizedTool)
             }
             this.servers.set('custom-tools', {
                 status: 'connected',
@@ -473,10 +480,12 @@ export class McpManager {
 
             // Register tools
             for (const tool of tools) {
-                this.tools.set(tool.name, {
+                const normalizedTool = this.withToolSourceMeta({
                     ...tool,
-                    serverName: name
+                    serverName: name,
+                    isMcpTool: true
                 })
+                this.registerTool(normalizedTool)
             }
 
             // Register resources
@@ -521,10 +530,10 @@ export class McpManager {
         if (!server) return
 
         try {
-            for (const [toolName, tool] of this.tools) {
+            for (const [, tool] of this.toolIdentities) {
                 if (tool.serverName === name) {
-                    this.tools.delete(toolName)
-                    this.clearToolCache(toolName)
+                    this.unregisterTool(tool.name, tool)
+                    this.clearToolCache(tool.name, name)
                 }
             }
             for (const [uri, resource] of this.resources) {
@@ -553,14 +562,96 @@ export class McpManager {
         }
     }
 
+    getToolSource(tool) {
+        if (!tool) return 'unknown'
+        if (tool.source === 'builtin' || tool.source === 'custom' || tool.source === 'mcp') return tool.source
+        if (tool.isMcpTool === true) return 'mcp'
+        if (tool.isJsTool === true || tool.isCustom === true || tool.serverName === 'custom-tools') return 'custom'
+        if (tool.isBuiltin === true || tool.serverName === 'builtin') return 'builtin'
+        if (tool.serverName) return 'mcp'
+        return 'unknown'
+    }
+
+    withToolSourceMeta(tool) {
+        const source = this.getToolSource(tool)
+        const normalizedTool = {
+            ...tool,
+            source,
+            isBuiltin: source === 'builtin',
+            isJsTool: tool.isJsTool === true,
+            isCustom: source === 'custom',
+            isMcpTool: source === 'mcp'
+        }
+        return {
+            ...normalizedTool,
+            identity: getAdapterToolIdentity(normalizedTool)
+        }
+    }
+
+    getToolIdentity(name, serverName) {
+        return serverName ? `${serverName}:${name}` : ''
+    }
+
+    parseToolIdentity(value) {
+        if (typeof value !== 'string') return null
+        const mcpMatch = value.match(/^mcp:([^:]+):(.+)$/)
+        if (mcpMatch) {
+            return { serverName: mcpMatch[1], name: mcpMatch[2] }
+        }
+        const directMatch = value.match(/^([^:]+):([^:]+)$/)
+        if (directMatch) {
+            return { serverName: directMatch[1], name: directMatch[2] }
+        }
+        return null
+    }
+
+    registerTool(tool) {
+        if (!tool?.name) return
+        this.tools.set(tool.name, tool)
+        const identity = this.getToolIdentity(tool.name, tool.serverName)
+        if (identity) this.toolIdentities.set(identity, tool)
+    }
+
+    unregisterTool(name, tool = null) {
+        const existing = tool || this.tools.get(name)
+        const identity = this.getToolIdentity(name, existing?.serverName)
+        if (identity) this.toolIdentities.delete(identity)
+        if (this.tools.get(name) === existing) {
+            const replacement = Array.from(this.toolIdentities.values()).find(item => item.name === name)
+            if (replacement) {
+                this.tools.set(name, replacement)
+            } else {
+                this.tools.delete(name)
+            }
+        }
+    }
+
+    getRegisteredTool(name, options = {}) {
+        const parsedIdentity = this.parseToolIdentity(name)
+        const toolName = parsedIdentity?.name || name
+        const serverName =
+            options.serverName || options.server_label || options.server_name || parsedIdentity?.serverName
+        const identity = this.getToolIdentity(toolName, serverName)
+        if (identity && this.toolIdentities.has(identity)) {
+            return this.toolIdentities.get(identity)
+        }
+        return this.tools.get(toolName) || null
+    }
+
     /**
      * 清除指定工具的缓存
      * @param {string} toolName - 工具名称
      */
-    clearToolCache(toolName) {
+    clearToolCache(toolName, serverName = '') {
         // 遍历缓存，删除该工具的所有缓存条目
+        const exactPrefix = serverName ? `${serverName}:${toolName}:` : null
+        const legacyPrefix = `${toolName}:`
+        const scopedSuffix = `:${toolName}:`
         for (const [cacheKey] of this.toolResultCache) {
-            if (cacheKey.startsWith(`${toolName}:`)) {
+            if (
+                (exactPrefix && cacheKey.startsWith(exactPrefix)) ||
+                (!exactPrefix && (cacheKey.startsWith(legacyPrefix) || cacheKey.includes(scopedSuffix)))
+            ) {
                 this.toolResultCache.delete(cacheKey)
             }
         }
@@ -571,9 +662,9 @@ export class McpManager {
      * @param {string} serverName - 服务器名称
      */
     clearServerCache(serverName) {
-        for (const [toolName, tool] of this.tools) {
+        for (const tool of this.toolIdentities.values()) {
             if (tool.serverName === serverName) {
-                this.clearToolCache(toolName)
+                this.clearToolCache(tool.name, serverName)
             }
         }
     }
@@ -670,39 +761,54 @@ export class McpManager {
      * @returns {Array} List of tools
      */
     getTools(options = {}) {
-        const { applyConfig = true } = options
+        const { applyConfig = true, includeDuplicateNames = false } = options
         const builtinConfig = config.get('builtinTools') || { enabled: true }
 
         let tools = []
-        for (const [name, tool] of this.tools) {
-            tools.push({
-                name,
-                description: tool.description,
-                inputSchema: tool.inputSchema,
-                serverName: tool.serverName,
-                isBuiltin: tool.isBuiltin,
-                isJsTool: tool.isJsTool,
-                isCustom: tool.isCustom
-            })
+        const sourceTools = includeDuplicateNames
+            ? Array.from(this.toolIdentities.values())
+            : Array.from(this.tools.values())
+        for (const tool of sourceTools) {
+            tools.push(
+                this.withToolSourceMeta({
+                    name: tool.name,
+                    description: tool.description,
+                    inputSchema: tool.inputSchema,
+                    serverName: tool.serverName,
+                    isBuiltin: tool.isBuiltin,
+                    isJsTool: tool.isJsTool,
+                    isCustom: tool.isCustom,
+                    isMcpTool: tool.isMcpTool,
+                    source: tool.source
+                })
+            )
         }
 
         // 应用配置过滤
         if (applyConfig) {
             // 过滤禁用的工具
             if (builtinConfig.disabledTools?.length > 0) {
-                tools = tools.filter(t => !builtinConfig.disabledTools.includes(t.name))
+                tools = tools.filter(
+                    t =>
+                        !builtinConfig.disabledTools.includes(t.name) &&
+                        !builtinConfig.disabledTools.includes(t.identity)
+                )
             }
 
             // 过滤危险工具（如果不允许）
             if (!builtinConfig.allowDangerous) {
                 const dangerous = builtinConfig.dangerousTools || []
-                tools = tools.filter(t => !dangerous.includes(t.name))
+                tools = tools.filter(t => !dangerous.includes(t.name) && !dangerous.includes(t.identity))
             }
 
             // 过滤允许的工具（白名单模式）
             if (builtinConfig.allowedTools?.length > 0) {
                 tools = tools.filter(
-                    t => builtinConfig.allowedTools.includes(t.name) || t.isJsTool || t.isCustom // JS工具和自定义工具不受白名单限制
+                    t =>
+                        builtinConfig.allowedTools.includes(t.name) ||
+                        builtinConfig.allowedTools.includes(t.identity) ||
+                        t.isJsTool ||
+                        t.isCustom // JS工具和自定义工具不受白名单限制
                 )
             }
         }
@@ -747,8 +853,8 @@ export class McpManager {
     /**
      * Get tool by name
      */
-    getTool(name) {
-        return this.tools.get(name) || null
+    getTool(name, options = {}) {
+        return this.getRegisteredTool(name, options)
     }
 
     /**
@@ -833,10 +939,10 @@ export class McpManager {
      * @returns {Promise} Tool result
      */
     async callTool(name, args, options = {}) {
-        let tool = this.tools.get(name)
+        let tool = this.getTool(name, options)
         if (!tool) {
             await this.init()
-            tool = this.tools.get(name)
+            tool = this.getTool(name, options)
         }
         if (!tool) {
             const builtinTools = builtinMcpServer.listTools()
@@ -863,7 +969,8 @@ export class McpManager {
         // 危险工具拦截检查
         const builtinConfig = config.get('builtinTools') || {}
         const dangerousTools = builtinConfig.dangerousTools || []
-        if (dangerousTools.includes(name) && !builtinConfig.allowDangerous) {
+        const toolIdentity = getAdapterToolIdentity(this.withToolSourceMeta(tool))
+        if ((dangerousTools.includes(name) || dangerousTools.includes(toolIdentity)) && !builtinConfig.allowDangerous) {
             logger.warn(`[MCP] 危险工具被拦截: ${name}`)
             return {
                 content: [
@@ -878,9 +985,10 @@ export class McpManager {
         }
 
         args = this.normalizeToolArgs(args)
+        const cacheScope = options.serverName || options.server_label || options.server_name || tool.serverName || ''
 
         if (options.useCache) {
-            const cacheKey = `${name}:${JSON.stringify(args)}`
+            const cacheKey = `${cacheScope}:${name}:${JSON.stringify(args)}`
             const cached = this.toolResultCache.get(cacheKey)
             if (cached && Date.now() - cached.timestamp < (options.cacheTTL || 60000)) {
                 logger.debug(`[MCP] Using cached result for tool: ${name}`)
@@ -950,7 +1058,7 @@ export class McpManager {
 
             if (options.useCache && !isResultError) {
                 // 只缓存成功的结果
-                const cacheKey = `${name}:${JSON.stringify(args)}`
+                const cacheKey = `${cacheScope}:${name}:${JSON.stringify(args)}`
                 this.toolResultCache.set(cacheKey, {
                     result,
                     timestamp: Date.now()
@@ -995,7 +1103,7 @@ export class McpManager {
         logger.debug(`[MCP] 并行执行: ${toolNames}`)
         const serverGroups = new Map()
         for (const call of toolCalls) {
-            const tool = this.tools.get(call.name)
+            const tool = this.getTool(call.name, call)
             const serverName = tool?.serverName || 'builtin'
             if (!serverGroups.has(serverName)) {
                 serverGroups.set(serverName, [])
@@ -1008,7 +1116,10 @@ export class McpManager {
             toolCalls.map(async call => {
                 const callStart = Date.now()
                 try {
-                    const result = await this.callTool(call.name, call.args, options)
+                    const result = await this.callTool(call.name, call.args, {
+                        ...options,
+                        serverName: call.serverName
+                    })
                     // 检查结果是否为错误
                     const isResultError =
                         result?.isError === true ||
@@ -1134,8 +1245,9 @@ export class McpManager {
      */
     async refreshBuiltinTools() {
         for (const [name, tool] of this.tools) {
-            if (tool.isBuiltin) {
-                this.tools.delete(name)
+            const source = this.getToolSource(tool)
+            if (source === 'builtin' || source === 'custom') {
+                this.unregisterTool(name, tool)
             }
         }
 
@@ -1143,17 +1255,23 @@ export class McpManager {
         await builtinMcpServer.loadModularTools()
         const tools = builtinMcpServer.listTools()
         for (const tool of tools) {
-            this.tools.set(tool.name, {
+            const normalizedTool = this.withToolSourceMeta({
                 ...tool,
-                serverName: 'builtin',
-                isBuiltin: true
+                serverName: tool.isJsTool ? 'custom-tools' : 'builtin',
+                isBuiltin: !tool.isCustom && !tool.isJsTool,
+                isCustom: tool.isCustom || tool.isJsTool || false
             })
+            this.registerTool(normalizedTool)
         }
 
         // 更新服务器信息
         const server = this.servers.get('builtin')
         if (server) {
-            server.tools = tools
+            server.tools = tools.filter(tool => !tool.isJsTool)
+        }
+        const customServer = this.servers.get('custom-tools')
+        if (customServer) {
+            customServer.tools = tools.filter(tool => tool.isJsTool)
         }
 
         logger.debug(`[MCP] Refreshed builtin tools: ${tools.length}`)
@@ -1169,7 +1287,7 @@ export class McpManager {
             // 移除旧的 JS 工具
             for (const [name, tool] of this.tools) {
                 if (tool.isJsTool) {
-                    this.tools.delete(name)
+                    this.unregisterTool(name, tool)
                 }
             }
 
@@ -1178,13 +1296,15 @@ export class McpManager {
 
             // 将新的 JS 工具添加到工具列表
             for (const [name, tool] of builtinMcpServer.jsTools) {
-                this.tools.set(name, {
+                const normalizedTool = this.withToolSourceMeta({
                     name: tool.name || name,
                     description: tool.description || '自定义 JS 工具',
                     inputSchema: tool.inputSchema || { type: 'object', properties: {} },
                     serverName: 'custom-tools',
-                    isJsTool: true
+                    isJsTool: true,
+                    isCustom: true
                 })
+                this.registerTool(normalizedTool)
             }
 
             // 更新自定义工具服务器

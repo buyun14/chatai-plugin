@@ -3,6 +3,42 @@ import {
     registerFromChaiteToolConverter,
     registerIntoChaiteConverter
 } from '../../utils/converter.js'
+import { toOpenAIChatTool } from '../tooling.js'
+
+function parseToolArguments(args, fallbackKey = 'input', warnOnFallback = true) {
+    if (args === undefined || args === null) return {}
+    if (typeof args !== 'string') return args || {}
+
+    try {
+        return JSON.parse(args)
+    } catch (e) {
+        let fixed = args.trim()
+        const openBraces = (fixed.match(/\{/g) || []).length
+        const closeBraces = (fixed.match(/\}/g) || []).length
+        const openBrackets = (fixed.match(/\[/g) || []).length
+        const closeBrackets = (fixed.match(/\]/g) || []).length
+        if (/:\s*\d+$/.test(fixed) || /:\s*"[^"]*$/.test(fixed)) {
+            if (/:\s*"[^"]*$/.test(fixed)) {
+                fixed += '"'
+            }
+        }
+        for (let i = 0; i < openBrackets - closeBrackets; i++) {
+            fixed += ']'
+        }
+        for (let i = 0; i < openBraces - closeBraces; i++) {
+            fixed += '}'
+        }
+
+        try {
+            return JSON.parse(fixed)
+        } catch {
+            if (warnOnFallback) {
+                console.warn('[OpenAI Converter] 解析 arguments 失败:', args, e.message)
+            }
+            return { [fallbackKey]: args }
+        }
+    }
+}
 
 /**
  * Convert Chaite IMessage to OpenAI format
@@ -212,44 +248,13 @@ registerIntoChaiteConverter('openai', msg => {
             let toolCalls = undefined
             if (msg.tool_calls && msg.tool_calls.length > 0) {
                 toolCalls = msg.tool_calls.map(t => {
-                    let args = t.function?.arguments
-                    if (typeof args === 'string') {
-                        try {
-                            args = JSON.parse(args)
-                        } catch (e) {
-                            let fixed = args.trim()
-                            const openBraces = (fixed.match(/\{/g) || []).length
-                            const closeBraces = (fixed.match(/\}/g) || []).length
-                            const openBrackets = (fixed.match(/\[/g) || []).length
-                            const closeBrackets = (fixed.match(/\]/g) || []).length
-                            if (/:\s*\d+$/.test(fixed) || /:\s*"[^"]*$/.test(fixed)) {
-                                if (/:\s*"[^"]*$/.test(fixed)) {
-                                    fixed += '"'
-                                }
-                            }
-                            for (let i = 0; i < openBrackets - closeBrackets; i++) {
-                                fixed += ']'
-                            }
-                            for (let i = 0; i < openBraces - closeBraces; i++) {
-                                fixed += '}'
-                            }
-
-                            try {
-                                args = JSON.parse(fixed)
-                                console.debug('[OpenAI Converter] 修复截断的arguments成功:', fixed)
-                            } catch {
-                                console.warn('[OpenAI Converter] 解析 arguments 失败:', args, e.message)
-                                args = {}
-                            }
-                        }
-                    } else if (!args) {
-                        args = {}
-                    }
+                    let args = t.function?.arguments ?? t.custom?.input
+                    args = parseToolArguments(args, 'input', !t.custom)
                     const toolCall = {
                         id: t.id,
                         type: 'function',
                         function: {
-                            name: t.function?.name,
+                            name: t.function?.name || t.custom?.name,
                             arguments: args
                         }
                     }
@@ -334,14 +339,7 @@ registerIntoChaiteConverter('openai', msg => {
  * Convert Chaite Tool to OpenAI format
  */
 registerFromChaiteToolConverter('openai', tool => {
-    return {
-        type: 'function',
-        function: {
-            name: tool.function.name,
-            description: tool.function.description,
-            parameters: tool.function.parameters
-        }
-    }
+    return toOpenAIChatTool(tool)
 })
 
 export {}

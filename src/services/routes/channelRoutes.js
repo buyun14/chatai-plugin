@@ -3,6 +3,7 @@ import { channelManager, normalizeBaseUrl } from '../llm/ChannelManager.js'
 import { statsService } from '../stats/StatsService.js'
 import { chatLogger } from '../../core/utils/logger.js'
 import config from '../../../config/config.js'
+import { resolveThinkingOptions } from '../llm/ThinkingOptions.js'
 
 import { ApiResponse } from './shared.js'
 
@@ -21,8 +22,7 @@ function getAdapterClientClass(adapterType = 'openai') {
 
 async function createChannelTestClient({ adapterType, apiKey, baseUrl, channel = {}, overrides = {} }) {
     const ClientClass = await getAdapterClientClass(adapterType)
-    const thinking = channel.advanced?.thinking || {}
-    const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
+    const thinkingOptions = resolveThinkingOptions({ channel })
     return new ClientClass({
         apiKey,
         baseUrl,
@@ -43,13 +43,17 @@ async function createChannelTestClient({ adapterType, apiKey, baseUrl, channel =
             channel.openaiApiInterface ??
             'chat',
         experimental: overrides.experimental ?? channel.experimental ?? {},
+        openaiResponses: overrides.openaiResponses ?? channel.openaiResponses ?? {},
         customHeaders: channel.customHeaders || {},
         headersTemplate: channel.headersTemplate || '',
         requestBodyTemplate: channel.requestBodyTemplate || '',
         imageConfig: channel.imageConfig || {},
-        enableReasoning,
-        reasoningEffort: thinking.defaultLevel || 'low',
-        thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto',
+        enableReasoning: thinkingOptions.enableReasoning,
+        reasoningEffort: thinkingOptions.reasoningEffort,
+        thinkingVendorControl: thinkingOptions.thinkingVendorControl,
+        ...(thinkingOptions.reasoningBudgetTokens !== undefined
+            ? { reasoningBudgetTokens: thinkingOptions.reasoningBudgetTokens }
+            : {}),
         channelId: channel.id,
         channelName: channel.name,
         features: ['chat'],
@@ -151,7 +155,8 @@ router.post('/test', async (req, res) => {
         endpoints,
         apiInterface,
         openaiApiInterface,
-        experimental
+        experimental,
+        openaiResponses
     } = req.body
     const startTime = Date.now()
 
@@ -172,6 +177,7 @@ router.post('/test', async (req, res) => {
             apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
             openaiApiInterface = apiInterface
             experimental = channel.experimental || {}
+            openaiResponses = channel.openaiResponses || {}
             models = channel.models
             advanced = channel.advanced || advanced
 
@@ -228,7 +234,8 @@ router.post('/test', async (req, res) => {
                 endpoints: endpoints || {},
                 apiInterface: apiInterface || openaiApiInterface || 'chat',
                 openaiApiInterface: apiInterface || openaiApiInterface || 'chat',
-                experimental: experimental || {}
+                experimental: experimental || {},
+                openaiResponses: openaiResponses || {}
             }
         })
 
@@ -249,20 +256,23 @@ router.post('/test', async (req, res) => {
         const useStreaming = advanced?.streaming?.enabled || false
         const temperature = advanced?.llm?.temperature ?? 0.7
         const maxTokens = advanced?.llm?.maxTokens || 100
-        const thinking = advanced?.thinking || {}
-        const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
+        const thinkingOptions = resolveThinkingOptions({ channel: { advanced } })
 
         const options = {
             model: actualTestModel,
             maxToken: maxTokens,
             temperature,
-            enableReasoning,
-            reasoningEffort: thinking.defaultLevel || 'low',
-            thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+            enableReasoning: thinkingOptions.enableReasoning,
+            reasoningEffort: thinkingOptions.reasoningEffort,
+            thinkingVendorControl: thinkingOptions.thinkingVendorControl,
+            ...(thinkingOptions.reasoningBudgetTokens !== undefined
+                ? { reasoningBudgetTokens: thinkingOptions.reasoningBudgetTokens }
+                : {})
         }
 
         let replyText = ''
         let apiUsage = null
+        let reportedModel = null
 
         if (useStreaming) {
             const stream = await client.streamMessage(
@@ -276,6 +286,9 @@ router.post('/test', async (req, res) => {
                     replyText += chunk.text
                 } else if (chunk.type === 'usage' || chunk.usage) {
                     apiUsage = chunk.usage || chunk
+                    reportedModel = chunk.model || reportedModel
+                } else if (chunk.model) {
+                    reportedModel = chunk.model
                 }
             }
         } else {
@@ -291,6 +304,7 @@ router.post('/test', async (req, res) => {
                 .map(c => c.text)
                 .join('')
             apiUsage = response.usage
+            reportedModel = response.model || null
         }
 
         const elapsed = Date.now() - startTime
@@ -299,6 +313,7 @@ router.post('/test', async (req, res) => {
             channelId: id || 'test',
             channelName,
             model: testModel,
+            reportedModel,
             keyIndex: usedKeyIndex,
             keyName: usedKeyName,
             strategy: usedStrategy,
@@ -486,17 +501,19 @@ router.post('/batch-test', async (req, res) => {
             const mapping = channelManager.getActualModel(channelId, model)
             const actualModel = mapping.actualModel
 
-            const thinking = channel.advanced?.thinking || {}
-            const enableReasoning = config.get('thinking.enabled') !== false && thinking.enableReasoning === true
+            const thinkingOptions = resolveThinkingOptions({ channel })
             const response = await client.sendMessage(
                 { role: 'user', content: [{ type: 'text', text: '说一声你好' }] },
                 {
                     model: actualModel,
                     maxToken: 50,
                     temperature: 0.7,
-                    enableReasoning,
-                    reasoningEffort: thinking.defaultLevel || 'low',
-                    thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
+                    enableReasoning: thinkingOptions.enableReasoning,
+                    reasoningEffort: thinkingOptions.reasoningEffort,
+                    thinkingVendorControl: thinkingOptions.thinkingVendorControl,
+                    ...(thinkingOptions.reasoningBudgetTokens !== undefined
+                        ? { reasoningBudgetTokens: thinkingOptions.reasoningBudgetTokens }
+                        : {})
                 }
             )
 
@@ -582,9 +599,20 @@ router.post('/test-model', async (req, res) => {
             chatLogger.info(`[单模型测试] 模型重定向: ${model} -> ${actualModel}`)
         }
 
+        const thinkingOptions = resolveThinkingOptions({ channel })
         const response = await client.sendMessage(
             { role: 'user', content: [{ type: 'text', text: '说一声你好' }] },
-            { model: actualModel, maxToken: 50, temperature: 0.7 }
+            {
+                model: actualModel,
+                maxToken: 50,
+                temperature: 0.7,
+                enableReasoning: thinkingOptions.enableReasoning,
+                reasoningEffort: thinkingOptions.reasoningEffort,
+                thinkingVendorControl: thinkingOptions.thinkingVendorControl,
+                ...(thinkingOptions.reasoningBudgetTokens !== undefined
+                    ? { reasoningBudgetTokens: thinkingOptions.reasoningBudgetTokens }
+                    : {})
+            }
         )
 
         const elapsed = Date.now() - startTime

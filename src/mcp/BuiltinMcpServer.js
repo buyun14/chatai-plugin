@@ -351,9 +351,18 @@ export class BuiltinMcpServer {
     async toggleTool(toolName, enabled) {
         const builtinConfig = config.get('builtinTools') || {}
         let disabledTools = builtinConfig.disabledTools || []
+        const mcpMatch = typeof toolName === 'string' ? toolName.match(/^mcp:([^:]+):(.+)$/) : null
+        const directMatch = !mcpMatch && typeof toolName === 'string' ? toolName.match(/^([^:]+):([^:]+)$/) : null
+        const plainName = mcpMatch?.[2] || directMatch?.[2] || toolName
+        const serverName = mcpMatch?.[1] || directMatch?.[1]
+        const equivalentNames = new Set([toolName, plainName])
+        if (serverName && plainName) {
+            equivalentNames.add(`${serverName}:${plainName}`)
+            equivalentNames.add(`mcp:${serverName}:${plainName}`)
+        }
 
         if (enabled) {
-            disabledTools = disabledTools.filter(t => t !== toolName)
+            disabledTools = disabledTools.filter(t => !equivalentNames.has(t))
         } else {
             if (!disabledTools.includes(toolName)) {
                 disabledTools.push(toolName)
@@ -645,7 +654,12 @@ export class BuiltinMcpServer {
                 tools = this.modularTools.map(t => ({
                     name: t.name,
                     description: t.description,
-                    inputSchema: t.inputSchema
+                    inputSchema: t.inputSchema,
+                    isBuiltin: true,
+                    source: 'builtin',
+                    ...(t.dangerous !== undefined ? { dangerous: t.dangerous } : {}),
+                    ...(t.requireMaster !== undefined ? { requireMaster: t.requireMaster } : {}),
+                    ...(t.requiredPermission !== undefined ? { requiredPermission: t.requiredPermission } : {})
                 }))
             } else {
                 let builtinTools = [...this.tools]
@@ -663,7 +677,12 @@ export class BuiltinMcpServer {
                 tools = builtinTools.map(t => ({
                     name: t.name,
                     description: t.description,
-                    inputSchema: t.inputSchema
+                    inputSchema: t.inputSchema,
+                    isBuiltin: true,
+                    source: 'builtin',
+                    ...(t.dangerous !== undefined ? { dangerous: t.dangerous } : {}),
+                    ...(t.requireMaster !== undefined ? { requireMaster: t.requireMaster } : {}),
+                    ...(t.requiredPermission !== undefined ? { requiredPermission: t.requiredPermission } : {})
                 }))
             }
         }

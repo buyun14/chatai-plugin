@@ -22,7 +22,13 @@ class StatsService {
         this.stats = {
             messages: { total: 0, byType: {}, byGroup: {}, byUser: {}, byHour: {} },
             models: { total: 0, byModel: {}, byChannel: {} },
-            tokens: { total: { input: 0, output: 0 }, byModel: {}, byUser: {} },
+            tokens: {
+                total: { input: 0, output: 0 },
+                cache: { readTokens: 0, writeTokens: 0, readCount: 0, writeCount: 0 },
+                reasoning: { tokens: 0 },
+                byModel: {},
+                byUser: {}
+            },
             tools: { total: 0, byTool: {} },
             startTime: Date.now(),
             lastUpdate: Date.now()
@@ -81,10 +87,33 @@ class StatsService {
                 const data = fs.readFileSync(this.statsFile, 'utf8')
                 this.stats = { ...this.stats, ...JSON.parse(data) }
             }
+            this._ensureStatsShape()
             this.loaded = true
         } catch (err) {
             console.error('[StatsService] 加载统计数据失败:', err.message)
         }
+    }
+
+    /**
+     * 补齐旧统计文件中不存在的新字段。
+     */
+    _ensureStatsShape() {
+        this.stats.messages ||= { total: 0, byType: {}, byGroup: {}, byUser: {}, byHour: {} }
+        this.stats.models ||= { total: 0, byModel: {}, byChannel: {} }
+        this.stats.tokens ||= {}
+        this.stats.tokens.total ||= { input: 0, output: 0 }
+        this.stats.tokens.total.input ??= 0
+        this.stats.tokens.total.output ??= 0
+        this.stats.tokens.cache ||= { readTokens: 0, writeTokens: 0, readCount: 0, writeCount: 0 }
+        this.stats.tokens.cache.readTokens ??= 0
+        this.stats.tokens.cache.writeTokens ??= 0
+        this.stats.tokens.cache.readCount ??= 0
+        this.stats.tokens.cache.writeCount ??= 0
+        this.stats.tokens.reasoning ||= { tokens: 0 }
+        this.stats.tokens.reasoning.tokens ??= 0
+        this.stats.tokens.byModel ||= {}
+        this.stats.tokens.byUser ||= {}
+        this.stats.tools ||= { total: 0, byTool: {} }
     }
 
     /**
@@ -148,51 +177,136 @@ class StatsService {
      * 更新内存中的模型统计（内部方法）
      * @private
      */
-    _updateModelStats({ model, channelId, userId, inputTokens = 0, outputTokens = 0, success = true }) {
+    _updateModelStats({
+        model,
+        channelId,
+        userId,
+        inputTokens = 0,
+        outputTokens = 0,
+        cacheReadTokens = 0,
+        cacheWriteTokens = 0,
+        cacheReadCount = 0,
+        cacheWriteCount = 0,
+        reasoningTokens = 0,
+        success = true
+    }) {
         this.init()
+        this._ensureStatsShape()
 
         this.stats.models.total++
 
         // 按模型统计
         if (!this.stats.models.byModel[model]) {
-            this.stats.models.byModel[model] = { calls: 0, success: 0, failed: 0, inputTokens: 0, outputTokens: 0 }
+            this.stats.models.byModel[model] = {
+                calls: 0,
+                success: 0,
+                failed: 0,
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                cacheReadCount: 0,
+                cacheWriteCount: 0,
+                reasoningTokens: 0
+            }
         }
         const modelStats = this.stats.models.byModel[model]
+        modelStats.cacheReadTokens ??= 0
+        modelStats.cacheWriteTokens ??= 0
+        modelStats.cacheReadCount ??= 0
+        modelStats.cacheWriteCount ??= 0
+        modelStats.reasoningTokens ??= 0
         modelStats.calls++
         if (success) modelStats.success++
         else modelStats.failed++
         modelStats.inputTokens += inputTokens
         modelStats.outputTokens += outputTokens
+        modelStats.cacheReadTokens += cacheReadTokens
+        modelStats.cacheWriteTokens += cacheWriteTokens
+        modelStats.cacheReadCount += cacheReadCount
+        modelStats.cacheWriteCount += cacheWriteCount
+        modelStats.reasoningTokens += reasoningTokens
 
         // 按渠道统计
         if (channelId) {
             if (!this.stats.models.byChannel[channelId]) {
-                this.stats.models.byChannel[channelId] = { calls: 0, inputTokens: 0, outputTokens: 0 }
+                this.stats.models.byChannel[channelId] = {
+                    calls: 0,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    cacheReadCount: 0,
+                    cacheWriteCount: 0,
+                    reasoningTokens: 0
+                }
             }
-            this.stats.models.byChannel[channelId].calls++
-            this.stats.models.byChannel[channelId].inputTokens += inputTokens
-            this.stats.models.byChannel[channelId].outputTokens += outputTokens
+            const channelStats = this.stats.models.byChannel[channelId]
+            channelStats.cacheReadTokens ??= 0
+            channelStats.cacheWriteTokens ??= 0
+            channelStats.cacheReadCount ??= 0
+            channelStats.cacheWriteCount ??= 0
+            channelStats.reasoningTokens ??= 0
+            channelStats.calls++
+            channelStats.inputTokens += inputTokens
+            channelStats.outputTokens += outputTokens
+            channelStats.cacheReadTokens += cacheReadTokens
+            channelStats.cacheWriteTokens += cacheWriteTokens
+            channelStats.cacheReadCount += cacheReadCount
+            channelStats.cacheWriteCount += cacheWriteCount
+            channelStats.reasoningTokens += reasoningTokens
         }
 
         // 总tokens
         this.stats.tokens.total.input += inputTokens
         this.stats.tokens.total.output += outputTokens
+        this.stats.tokens.cache.readTokens += cacheReadTokens
+        this.stats.tokens.cache.writeTokens += cacheWriteTokens
+        this.stats.tokens.cache.readCount += cacheReadCount
+        this.stats.tokens.cache.writeCount += cacheWriteCount
+        this.stats.tokens.reasoning.tokens += reasoningTokens
 
         // 按用户tokens
         if (userId) {
             if (!this.stats.tokens.byUser[userId]) {
-                this.stats.tokens.byUser[userId] = { input: 0, output: 0 }
+                this.stats.tokens.byUser[userId] = {
+                    input: 0,
+                    output: 0,
+                    cacheReadTokens: 0,
+                    cacheWriteTokens: 0,
+                    reasoningTokens: 0
+                }
             }
-            this.stats.tokens.byUser[userId].input += inputTokens
-            this.stats.tokens.byUser[userId].output += outputTokens
+            const userStats = this.stats.tokens.byUser[userId]
+            userStats.cacheReadTokens ??= 0
+            userStats.cacheWriteTokens ??= 0
+            userStats.reasoningTokens ??= 0
+            userStats.input += inputTokens
+            userStats.output += outputTokens
+            userStats.cacheReadTokens += cacheReadTokens
+            userStats.cacheWriteTokens += cacheWriteTokens
+            userStats.reasoningTokens += reasoningTokens
         }
 
         // 按模型tokens
         if (!this.stats.tokens.byModel[model]) {
-            this.stats.tokens.byModel[model] = { input: 0, output: 0 }
+            this.stats.tokens.byModel[model] = {
+                input: 0,
+                output: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                reasoningTokens: 0
+            }
         }
-        this.stats.tokens.byModel[model].input += inputTokens
-        this.stats.tokens.byModel[model].output += outputTokens
+        const tokenModelStats = this.stats.tokens.byModel[model]
+        tokenModelStats.cacheReadTokens ??= 0
+        tokenModelStats.cacheWriteTokens ??= 0
+        tokenModelStats.reasoningTokens ??= 0
+        tokenModelStats.input += inputTokens
+        tokenModelStats.output += outputTokens
+        tokenModelStats.cacheReadTokens += cacheReadTokens
+        tokenModelStats.cacheWriteTokens += cacheWriteTokens
+        tokenModelStats.reasoningTokens += reasoningTokens
 
         this.save()
     }
@@ -259,10 +373,21 @@ class StatsService {
             responseText = null,
             apiUsage = null
         } = options
+        const reportedModel =
+            options.reportedModel ||
+            options.responseModel ||
+            response?.model ||
+            apiUsage?.model ||
+            apiUsage?.responseModel ||
+            null
+        const effectiveModel = reportedModel || model || 'unknown'
         let inputTokens = providedInputTokens
         let outputTokens = providedOutputTokens
         let cacheReadTokens = 0
         let cacheCreationTokens = 0
+        let cacheWriteTokens = 0
+        let cacheReadCount = 0
+        let cacheWriteCount = 0
         let reasoningTokens = 0
         let isEstimated = false
         if (apiUsage) {
@@ -284,14 +409,26 @@ class StatsService {
 
             cacheReadTokens =
                 apiUsage.cache_read_input_tokens ||
+                apiUsage.cacheReadTokens ||
                 apiUsage.cachedTokens ||
                 apiUsage.cached_tokens ||
                 apiUsage.prompt_tokens_details?.cached_tokens ||
+                apiUsage.input_tokens_details?.cached_tokens ||
                 apiUsage.cachedContentTokenCount ||
                 0
-            cacheCreationTokens = apiUsage.cache_creation_input_tokens || apiUsage.cacheCreationTokens || 0
+            cacheCreationTokens =
+                apiUsage.cache_creation_input_tokens ||
+                apiUsage.cacheCreationTokens ||
+                apiUsage.cacheWriteTokens ||
+                apiUsage.prompt_tokens_details?.cache_creation_tokens ||
+                apiUsage.input_tokens_details?.cache_creation_tokens ||
+                0
+            cacheWriteTokens = apiUsage.cacheWriteTokens || cacheCreationTokens || 0
+            cacheReadCount = apiUsage.cacheReadCount || (cacheReadTokens > 0 ? 1 : 0)
+            cacheWriteCount = apiUsage.cacheWriteCount || (cacheWriteTokens > 0 ? 1 : 0)
             reasoningTokens =
                 apiUsage.completion_tokens_details?.reasoning_tokens ||
+                apiUsage.output_tokens_details?.reasoning_tokens ||
                 apiUsage.reasoning_tokens ||
                 apiUsage.reasoningTokens ||
                 0
@@ -319,11 +456,16 @@ class StatsService {
         // 1. 更新内存统计（同步）
         try {
             this._updateModelStats({
-                model,
+                model: effectiveModel,
                 channelId,
                 userId,
                 inputTokens,
                 outputTokens,
+                cacheReadTokens,
+                cacheWriteTokens,
+                cacheReadCount,
+                cacheWriteCount,
+                reasoningTokens,
                 success
             })
         } catch (err) {
@@ -333,7 +475,7 @@ class StatsService {
         // 2. 记录到遥测服务（异步，不含敏感信息）
         try {
             telemetryService.recordUsage({
-                model: model || 'unknown',
+                model: effectiveModel,
                 inputTokens,
                 outputTokens,
                 success,
@@ -349,7 +491,9 @@ class StatsService {
             recordId = await usageStats.record({
                 channelId: channelId || 'unknown',
                 channelName: channelName || 'Unknown',
-                model: model || 'unknown',
+                model: effectiveModel,
+                requestedModel: model || 'unknown',
+                reportedModel,
                 keyIndex,
                 keyName,
                 strategy,
@@ -358,6 +502,9 @@ class StatsService {
                 totalTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
+                cacheWriteTokens,
+                cacheReadCount,
+                cacheWriteCount,
                 reasoningTokens,
                 duration,
                 success,
@@ -488,12 +635,28 @@ class StatsService {
             tokens: {
                 total: this.stats.tokens.total,
                 totalSum: this.stats.tokens.total.input + this.stats.tokens.total.output,
+                cache: this.stats.tokens.cache,
+                reasoning: this.stats.tokens.reasoning,
                 byModel: Object.entries(this.stats.tokens.byModel)
-                    .map(([name, stats]) => ({ name, ...stats, total: stats.input + stats.output }))
+                    .map(([name, stats]) => ({
+                        name,
+                        ...stats,
+                        cacheReadTokens: stats.cacheReadTokens || 0,
+                        cacheWriteTokens: stats.cacheWriteTokens || 0,
+                        reasoningTokens: stats.reasoningTokens || 0,
+                        total: stats.input + stats.output
+                    }))
                     .sort((a, b) => b.total - a.total)
                     .slice(0, 10),
                 topUsers: Object.entries(this.stats.tokens.byUser)
-                    .map(([userId, stats]) => ({ userId, ...stats, total: stats.input + stats.output }))
+                    .map(([userId, stats]) => ({
+                        userId,
+                        ...stats,
+                        cacheReadTokens: stats.cacheReadTokens || 0,
+                        cacheWriteTokens: stats.cacheWriteTokens || 0,
+                        reasoningTokens: stats.reasoningTokens || 0,
+                        total: stats.input + stats.output
+                    }))
                     .sort((a, b) => b.total - a.total)
                     .slice(0, 10)
             },
@@ -528,7 +691,13 @@ class StatsService {
         this.stats = {
             messages: { total: 0, byType: {}, byGroup: {}, byUser: {}, byHour: {} },
             models: { total: 0, byModel: {}, byChannel: {} },
-            tokens: { total: { input: 0, output: 0 }, byModel: {}, byUser: {} },
+            tokens: {
+                total: { input: 0, output: 0 },
+                cache: { readTokens: 0, writeTokens: 0, readCount: 0, writeCount: 0 },
+                reasoning: { tokens: 0 },
+                byModel: {},
+                byUser: {}
+            },
             tools: { total: 0, byTool: {} },
             startTime: Date.now(),
             lastUpdate: Date.now()

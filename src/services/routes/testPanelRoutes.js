@@ -129,12 +129,14 @@ router.post('/batch-test', async (req, res) => {
                 channelId,
                 channelName: channel.name,
                 model,
+                reportedModel: response?.model || null,
                 keyIndex: keyInfo?.keyIndex ?? -1,
                 keyName: keyInfo?.keyName ?? '',
                 duration: elapsed,
                 success: true,
                 source: 'batch-test',
-                responseText: replyText
+                responseText: replyText,
+                apiUsage: response?.usage
             })
 
             return result

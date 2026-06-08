@@ -1,8 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk'
 import crypto from 'node:crypto'
+import { chatLogger } from '../../utils/logger.js'
 import { AbstractClient, parseXmlToolCalls, preprocessImageUrls } from '../AbstractClient.js'
 import { getFromChaiteConverter, getFromChaiteToolConverter, getIntoChaiteConverter } from '../../utils/converter.js'
 import './converter.js'
+import { resolveToolChoice } from '../tooling.js'
+
+const logger = chatLogger
 
 /**
  * @typedef {import('../../types').BaseClientOptions} BaseClientOptions
@@ -19,6 +23,8 @@ import './converter.js'
 function getClaudeThinkingConfig(options = {}, clientOptions = {}) {
     const enableReasoning = options.enableReasoning ?? clientOptions.enableReasoning ?? false
     if (!enableReasoning) return undefined
+    const effort = options.reasoningEffort ?? clientOptions.reasoningEffort
+    if (effort === 'none' || effort === 'auto') return undefined
     const maxTokens = options.maxToken || 4096
     if (maxTokens <= 1024) return undefined
     const fallbackBudget = Math.max(1024, Math.min(Math.floor(maxTokens / 2), maxTokens - 1))
@@ -135,7 +141,10 @@ export class ClaudeClient extends AbstractClient {
 
         // 转换工具
         const toolConvert = getFromChaiteToolConverter('claude')
-        const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const choiceResolution = resolveToolChoice(options, convertedTools, 'claude')
+        const tools = choiceResolution.tools.length > 0 ? choiceResolution.tools : undefined
+        options._exposedTools = tools || []
 
         const requestPayload = {
             model,
@@ -143,7 +152,8 @@ export class ClaudeClient extends AbstractClient {
             temperature: options.temperature,
             system: systemPrompt || undefined,
             messages,
-            tools
+            tools,
+            tool_choice: tools ? choiceResolution.toolChoice : undefined
         }
         const thinking = getClaudeThinkingConfig(options, this.options)
         if (thinking) requestPayload.thinking = thinking
@@ -194,13 +204,18 @@ export class ClaudeClient extends AbstractClient {
             completionTokens: response.usage?.output_tokens,
             totalTokens: (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0),
             cachedTokens: response.usage?.cache_read_input_tokens || 0,
+            cacheReadTokens: response.usage?.cache_read_input_tokens || 0,
             cacheCreationTokens: response.usage?.cache_creation_input_tokens || 0,
+            cacheWriteTokens: response.usage?.cache_creation_input_tokens || 0,
+            cacheReadCount: response.usage?.cache_read_input_tokens > 0 ? 1 : 0,
+            cacheWriteCount: response.usage?.cache_creation_input_tokens > 0 ? 1 : 0,
             reasoningTokens: 0
         }
 
         return {
             id,
             parentId: options.parentMessageId,
+            model: response.model || model,
             role: 'assistant',
             content: contents,
             toolCalls,
@@ -212,7 +227,7 @@ export class ClaudeClient extends AbstractClient {
      * 流式发送消息
      * @param {IMessage[]} histories
      * @param {SendMessageOption | Partial<SendMessageOption>} options
-     * @returns {Promise<AsyncGenerator<string, void, unknown>>}
+     * @returns {Promise<AsyncGenerator<string | object, void, unknown>>}
      */
     async streamMessage(histories, options) {
         const apiKey = await import('../../utils/helpers.js').then(m => m.getKey(this.apiKey, this.multipleKeyStrategy))
@@ -251,7 +266,10 @@ export class ClaudeClient extends AbstractClient {
         }
 
         const toolConvert = getFromChaiteToolConverter('claude')
-        const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const choiceResolution = resolveToolChoice(options, convertedTools, 'claude')
+        const tools = choiceResolution.tools.length > 0 ? choiceResolution.tools : undefined
+        options._exposedTools = tools || []
 
         const requestPayload = {
             model,
@@ -260,6 +278,7 @@ export class ClaudeClient extends AbstractClient {
             system: systemPrompt || undefined,
             messages,
             tools,
+            tool_choice: tools ? choiceResolution.toolChoice : undefined,
             stream: true
         }
         const thinking = getClaudeThinkingConfig(options, this.options)
@@ -268,12 +287,39 @@ export class ClaudeClient extends AbstractClient {
         const stream = await client.messages.create(requestPayload)
 
         async function* generator() {
+            const toolBlocks = new Map()
             for await (const event of stream) {
+                if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+                    toolBlocks.set(event.index, {
+                        id: event.content_block.id,
+                        type: 'function',
+                        function: {
+                            name: event.content_block.name,
+                            arguments:
+                                typeof event.content_block.input === 'string'
+                                    ? event.content_block.input
+                                    : JSON.stringify(event.content_block.input || {})
+                        }
+                    })
+                    continue
+                }
                 if (event.type === 'content_block_delta') {
                     if (event.delta.type === 'text_delta') {
-                        yield event.delta.text
+                        yield { type: 'text', text: event.delta.text }
+                    } else if (event.delta.type === 'input_json_delta') {
+                        const existing = toolBlocks.get(event.index)
+                        if (existing) {
+                            existing.function.arguments =
+                                existing.function.arguments === '{}'
+                                    ? event.delta.partial_json || ''
+                                    : existing.function.arguments + (event.delta.partial_json || '')
+                        }
                     }
                 }
+            }
+            const toolCalls = Array.from(toolBlocks.values()).filter(tc => tc.id && tc.function.name)
+            if (toolCalls.length > 0) {
+                yield { type: 'tool_calls', toolCalls }
             }
         }
 

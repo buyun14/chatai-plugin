@@ -103,6 +103,11 @@
  * @property {number} [completionTokens]
  * @property {number} [totalTokens]
  * @property {number} [cachedTokens]
+ * @property {number} [cacheReadTokens]
+ * @property {number} [cacheWriteTokens]
+ * @property {number} [cacheCreationTokens]
+ * @property {number} [cacheReadCount]
+ * @property {number} [cacheWriteCount]
  * @property {number} [reasoningTokens]
  */
 

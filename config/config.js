@@ -329,6 +329,7 @@ class Config {
              *   priority: number,               // 优先级（数字越小优先级越高）
              *   chatPath: string,               // 自定义对话接口路径（兼容旧格式，如 '/chat/completions'）
              *   modelsPath: string,              // 自定义模型列表路径（兼容旧格式，如 '/models'）
+             *   openaiResponses: object,         // OpenAI Responses API SDK参数透传；原生skills需放在 tools[].environment.skills
              *   endpoints: {                    // 自定义端点配置（优先使用，覆盖chatPath/modelsPath）
              *     chat: string,                  // 对话端点，如 '/chat/completions' 或 '/v1/chat'
              *     models: string,                // 模型列表端点，如 '/models' 或 '/v1/models'
@@ -543,8 +544,9 @@ class Config {
             },
             thinking: {
                 enabled: true, // 思考适配总开关（关闭后不解析和显示思考内容）
-                defaultLevel: 'low', // 思考深度: 'low', 'medium', 'high'
+                defaultLevel: 'low', // 思考深度: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'
                 enableReasoning: false, // 启用推理模式（发送reasoning参数给API）
+                reasoningBudgetTokens: 0, // 推理预算 tokens，0 表示不指定
                 showThinkingContent: true, // 显示思考内容
                 useForwardMsg: true // 思考内容使用合并转发
             },

@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import config from '../../../config/config.js'
 import { segment } from '../../utils/messageParser.js'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 
 export const bltoolsTools = [
     {

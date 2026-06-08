@@ -207,6 +207,8 @@ class UsageStats {
             channelId: record.channelId || 'unknown',
             channelName: record.channelName || 'Unknown',
             model: record.model || 'unknown',
+            requestedModel: record.requestedModel || record.model || 'unknown',
+            reportedModel: record.reportedModel || null,
             keyIndex: record.keyIndex ?? -1,
             keyName: record.keyName || '',
             strategy: record.strategy || '',
@@ -215,6 +217,9 @@ class UsageStats {
             totalTokens: record.totalTokens || (record.inputTokens || 0) + (record.outputTokens || 0),
             cacheReadTokens: record.cacheReadTokens || 0,
             cacheCreationTokens: record.cacheCreationTokens || 0,
+            cacheWriteTokens: record.cacheWriteTokens || record.cacheCreationTokens || 0,
+            cacheReadCount: record.cacheReadCount || 0,
+            cacheWriteCount: record.cacheWriteCount || 0,
             reasoningTokens: record.reasoningTokens || 0,
             duration: record.duration || 0,
             success: isSuccess,
@@ -284,6 +289,11 @@ class UsageStats {
             ['failedCalls', record.success ? 0 : 1],
             ['totalInputTokens', record.inputTokens],
             ['totalOutputTokens', record.outputTokens],
+            ['totalCacheReadTokens', record.cacheReadTokens || 0],
+            ['totalCacheWriteTokens', record.cacheWriteTokens || record.cacheCreationTokens || 0],
+            ['totalCacheReadCount', record.cacheReadCount || 0],
+            ['totalCacheWriteCount', record.cacheWriteCount || 0],
+            ['totalReasoningTokens', record.reasoningTokens || 0],
             ['totalDuration', record.duration]
         ]
 
@@ -378,6 +388,11 @@ class UsageStats {
                 failedCalls: parseInt(stats?.failedCalls || '0'),
                 totalInputTokens: parseInt(stats?.totalInputTokens || '0'),
                 totalOutputTokens: parseInt(stats?.totalOutputTokens || '0'),
+                totalCacheReadTokens: parseInt(stats?.totalCacheReadTokens || '0'),
+                totalCacheWriteTokens: parseInt(stats?.totalCacheWriteTokens || '0'),
+                totalCacheReadCount: parseInt(stats?.totalCacheReadCount || '0'),
+                totalCacheWriteCount: parseInt(stats?.totalCacheWriteCount || '0'),
+                totalReasoningTokens: parseInt(stats?.totalReasoningTokens || '0'),
                 totalDuration: parseInt(stats?.totalDuration || '0'),
                 avgDuration:
                     stats?.totalCalls > 0
@@ -431,6 +446,14 @@ class UsageStats {
         const successCalls = records.filter(r => r.success).length
         const totalInputTokens = records.reduce((sum, r) => sum + (r.inputTokens || 0), 0)
         const totalOutputTokens = records.reduce((sum, r) => sum + (r.outputTokens || 0), 0)
+        const totalCacheReadTokens = records.reduce((sum, r) => sum + (r.cacheReadTokens || 0), 0)
+        const totalCacheWriteTokens = records.reduce(
+            (sum, r) => sum + (r.cacheWriteTokens || r.cacheCreationTokens || 0),
+            0
+        )
+        const totalCacheReadCount = records.reduce((sum, r) => sum + (r.cacheReadCount || 0), 0)
+        const totalCacheWriteCount = records.reduce((sum, r) => sum + (r.cacheWriteCount || 0), 0)
+        const totalReasoningTokens = records.reduce((sum, r) => sum + (r.reasoningTokens || 0), 0)
         const totalDuration = records.reduce((sum, r) => sum + (r.duration || 0), 0)
 
         return {
@@ -440,6 +463,11 @@ class UsageStats {
             failedCalls: totalCalls - successCalls,
             totalInputTokens,
             totalOutputTokens,
+            totalCacheReadTokens,
+            totalCacheWriteTokens,
+            totalCacheReadCount,
+            totalCacheWriteCount,
+            totalReasoningTokens,
             totalDuration,
             avgDuration: totalCalls > 0 ? Math.round(totalDuration / totalCalls) : 0,
             successRate: totalCalls > 0 ? Math.round((successCalls / totalCalls) * 100) : 0

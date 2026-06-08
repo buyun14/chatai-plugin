@@ -111,6 +111,7 @@ initTasks.push(
             const skillsModule = await initSkillsModule(__dirname)
             global.chatAiSkillsConfig = skillsModule.config
             global.chatAiSkillsLoader = skillsModule.loader
+            global.chatAiSkillDocumentLoader = skillsModule.documents
 
             // 创建默认 SkillsAgent 实例
             const { createSkillsAgent, SkillsAgent } = await import('./src/services/agent/index.js')
@@ -122,13 +123,14 @@ initTasks.push(
             const builtinCount = bySource.builtin?.length || 0
             const customCount = bySource.custom?.length || 0
             const mcpToolCount = Object.values(bySource.mcp || {}).flat().length
+            const documentSkillCount = skillsModule.loader.getSkillDocuments?.().length || 0
             global.chatAiSkillsAgent = defaultAgent
             global.ChatAiSkillsAgent = SkillsAgent
 
             const mode = skillsModule.config.getMode()
             chatLogger.info(
                 'Skills',
-                `初始化完成: ${skillCount} 个技能 (内置: ${builtinCount}, 自定义: ${customCount}, MCP: ${mcpToolCount}), ${categoryCount} 个类别, mode=${mode}`
+                `初始化完成: ${skillCount} 个工具技能 (内置: ${builtinCount}, 自定义: ${customCount}, MCP: ${mcpToolCount}), ${documentSkillCount} 个文档技能, ${categoryCount} 个类别, mode=${mode}`
             )
             return {
                 name: 'Skills',
@@ -139,6 +141,7 @@ initTasks.push(
                 builtinCount,
                 customCount,
                 mcpToolCount,
+                documentSkillCount,
                 mode
             }
         } catch (err) {

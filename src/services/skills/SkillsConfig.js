@@ -26,12 +26,14 @@ const DEFAULT_CONFIG = {
             custom: {
                 enabled: true,
                 path: 'data/tools',
-                autoReload: true
+                autoReload: true,
+                disabledTools: []
             },
             mcp: {
                 enabled: true,
                 servers: [],
-                disabledServers: []
+                disabledServers: [],
+                disabledTools: []
             }
         },
         groups: [],
@@ -47,6 +49,14 @@ const DEFAULT_CONFIG = {
             enabled: true,
             useSummary: true,
             maxGroups: 3
+        },
+        documents: {
+            enabled: true,
+            mode: 'auto',
+            paths: ['data/skills', '.cursor/skills', '.claude/skills', '.codex/skills'],
+            maxDepth: 6,
+            maxFileBytes: 65536,
+            maxPromptChars: 20000
         },
         security: {
             dangerousTools: ['kick_member', 'mute_member', 'recall_message', 'set_group_admin', 'write_file'],
@@ -152,6 +162,11 @@ class SkillsConfig {
             Object.assign(merged.skills.dispatch, skills.dispatch)
         }
 
+        // 合并 SKILL.md 文档技能配置
+        if (skills.documents) {
+            Object.assign(merged.skills.documents, skills.documents)
+        }
+
         // 合并 security
         if (skills.security) {
             Object.assign(merged.skills.security, skills.security)
@@ -184,6 +199,21 @@ class SkillsConfig {
         if (skills.execution.maxParallel > 20) {
             logger.warn('[SkillsConfig] maxParallel 太大，设置为最大值 20')
             skills.execution.maxParallel = 20
+        }
+        if (!Array.isArray(skills.documents.paths)) {
+            skills.documents.paths = DEFAULT_CONFIG.skills.documents.paths
+        }
+        if (!['auto', 'all', 'explicit'].includes(skills.documents.mode)) {
+            skills.documents.mode = DEFAULT_CONFIG.skills.documents.mode
+        }
+        if (skills.documents.maxDepth < 0) {
+            skills.documents.maxDepth = DEFAULT_CONFIG.skills.documents.maxDepth
+        }
+        if (skills.documents.maxFileBytes < 1024) {
+            skills.documents.maxFileBytes = 1024
+        }
+        if (skills.documents.maxPromptChars < 1000) {
+            skills.documents.maxPromptChars = 1000
         }
 
         // 验证 groups
@@ -333,7 +363,14 @@ ${yamlContent}`
      * 获取禁用的工具列表
      */
     getDisabledTools() {
-        return this.config?.skills?.sources?.builtin?.disabledTools || []
+        const sources = this.config?.skills?.sources || DEFAULT_CONFIG.skills.sources
+        return Array.from(
+            new Set([
+                ...(sources.builtin?.disabledTools || []),
+                ...(sources.custom?.disabledTools || []),
+                ...(sources.mcp?.disabledTools || [])
+            ])
+        )
     }
 
     /**
@@ -401,6 +438,13 @@ ${yamlContent}`
     }
 
     /**
+     * 获取 SKILL.md 文档技能配置
+     */
+    getDocumentSkillsConfig() {
+        return this.config?.skills?.documents || DEFAULT_CONFIG.skills.documents
+    }
+
+    /**
      * 获取安全配置
      */
     getSecurityConfig() {
@@ -412,7 +456,9 @@ ${yamlContent}`
      */
     isDangerousTool(toolName) {
         const dangerousTools = this.config?.skills?.security?.dangerousTools || []
-        return dangerousTools.includes(toolName)
+        const identity = typeof toolName === 'object' ? toolName.identity : ''
+        const name = typeof toolName === 'object' ? toolName.name : toolName
+        return dangerousTools.includes(name) || Boolean(identity && dangerousTools.includes(identity))
     }
 
     /**
@@ -502,7 +548,7 @@ ${yamlContent}`
      * 添加工具到禁用列表
      */
     async disableTool(toolName) {
-        const disabledTools = this.getDisabledTools()
+        const disabledTools = this.config.skills.sources.builtin.disabledTools
         if (!disabledTools.includes(toolName)) {
             disabledTools.push(toolName)
             await this._saveConfig()
@@ -514,10 +560,18 @@ ${yamlContent}`
      * 从禁用列表移除工具
      */
     async enableTool(toolName) {
-        const disabledTools = this.config.skills.sources.builtin.disabledTools
-        const index = disabledTools.indexOf(toolName)
-        if (index !== -1) {
-            disabledTools.splice(index, 1)
+        const sources = this.config.skills.sources
+        let changed = false
+        for (const source of [sources.builtin, sources.custom, sources.mcp]) {
+            const disabledTools = source?.disabledTools
+            if (!Array.isArray(disabledTools)) continue
+            const index = disabledTools.indexOf(toolName)
+            if (index !== -1) {
+                disabledTools.splice(index, 1)
+                changed = true
+            }
+        }
+        if (changed) {
             await this._saveConfig()
             this._notifyWatchers()
         }

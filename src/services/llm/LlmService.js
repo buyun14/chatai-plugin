@@ -6,6 +6,8 @@ import { presetManager } from '../preset/PresetManager.js'
 import { channelManager } from './ChannelManager.js'
 import { getScopeManager } from '../scope/ScopeManager.js'
 import { databaseService } from '../storage/DatabaseService.js'
+import { resolveThinkingOptions } from './ThinkingOptions.js'
+import { resolveToolPermission } from '../tools/ToolPermission.js'
 
 let _scopeManager = null
 const ensureScopeManager = async () => {
@@ -35,10 +37,13 @@ export class LlmService {
     static async createClient(options = {}) {
         const enableTools = options.enableTools !== false && options.toolApprovalMode !== 'ask'
 
-        // 使用传入的选项，不再读取全局thinking配置
-        let enableReasoning = options.enableReasoning || false
-        let reasoningEffort = options.reasoningEffort || 'low'
-        let thinkingVendorControl = options.thinkingVendorControl
+        let preset = null
+        if (options.presetId || options.preset) {
+            await presetManager.init()
+            preset = options.preset || presetManager.get(options.presetId)
+        }
+
+        let thinkingOptions = resolveThinkingOptions({ requestOptions: options, preset })
 
         // 从渠道管理器加载配置
         await channelManager.init()
@@ -52,7 +57,8 @@ export class LlmService {
             responsePath,
             endpoints,
             apiInterface,
-            experimental
+            experimental,
+            openaiResponses
 
         // 优先使用传入的选项
         if (options.apiKey && options.baseUrl) {
@@ -65,6 +71,7 @@ export class LlmService {
             endpoints = options.endpoints || {}
             apiInterface = options.apiInterface || options.openaiApiInterface || 'chat'
             experimental = options.experimental || {}
+            openaiResponses = options.openaiResponses || {}
         } else {
             const model = options.model || config.get('llm.defaultModel')
             const channel =
@@ -86,23 +93,13 @@ export class LlmService {
             responsePath = channel.responsePath || endpoints.responses || ''
             apiInterface = channel.apiInterface || channel.openaiApiInterface || 'chat'
             experimental = channel.experimental || {}
+            openaiResponses = channel.openaiResponses || {}
             // 自动选择渠道时，从渠道获取 imageConfig（调用方未显式传入的场景）
             if (!options.imageConfig && channel.imageConfig) {
                 options.imageConfig = channel.imageConfig
             }
-            const chThinking = channel.advanced?.thinking
-            if (options.enableReasoning === undefined && chThinking?.enableReasoning !== undefined) {
-                enableReasoning = config.get('thinking.enabled') !== false ? chThinking.enableReasoning : false
-            }
-            if (options.reasoningEffort === undefined && chThinking?.defaultLevel) {
-                reasoningEffort = chThinking.defaultLevel
-            }
-            if (thinkingVendorControl === undefined && chThinking?.vendorThinkingControl !== undefined) {
-                thinkingVendorControl = chThinking.vendorThinkingControl
-            }
+            thinkingOptions = resolveThinkingOptions({ requestOptions: options, channel })
         }
-
-        thinkingVendorControl = thinkingVendorControl ?? 'auto'
 
         /*
          * 根据适配器类型选择客户端类
@@ -147,7 +144,6 @@ export class LlmService {
                 // 如果可用，获取预设工具配置
                 let toolsConfig = null
                 if (options.presetId) {
-                    await presetManager.init()
                     toolsConfig = presetManager.getToolsConfig(options.presetId)
                 }
 
@@ -156,7 +152,7 @@ export class LlmService {
                     toolsConfig,
                     event: options.event,
                     presetId: options.presetId,
-                    userPermission: options.userPermission || options.event?.sender?.role || 'member',
+                    userPermission: resolveToolPermission(options),
                     groupId: options.groupId,
                     userId: options.userId
                 })
@@ -174,12 +170,18 @@ export class LlmService {
             apiInterface,
             openaiApiInterface: apiInterface,
             experimental,
+            openaiResponses,
             features: ['chat'],
             tools,
-            enableReasoning,
-            reasoningEffort,
-            thinkingVendorControl,
-            reasoningBudgetTokens: options.reasoningBudgetTokens
+            enableReasoning: thinkingOptions.enableReasoning,
+            reasoningEffort: thinkingOptions.reasoningEffort,
+            thinkingVendorControl: thinkingOptions.thinkingVendorControl,
+            ...(thinkingOptions.reasoningBudgetTokens !== undefined
+                ? { reasoningBudgetTokens: thinkingOptions.reasoningBudgetTokens }
+                : {})
+        }
+        if (options.toolChoice !== undefined && options.toolChoice !== null) {
+            clientConfig.toolChoice = options.toolChoice
         }
 
         if (options.apiInterface || options.openaiApiInterface) {
@@ -194,6 +196,9 @@ export class LlmService {
         }
         if (options.experimental) {
             clientConfig.experimental = options.experimental
+        }
+        if (options.openaiResponses) {
+            clientConfig.openaiResponses = options.openaiResponses
         }
 
         // 传递图片处理配置
@@ -266,6 +271,7 @@ export class LlmService {
             endpoints: channel.endpoints || {},
             apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
             openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
+            openaiResponses: channel.openaiResponses || {},
             customHeaders: channel.customHeaders || {},
             headersTemplate: channel.headersTemplate || '',
             requestBodyTemplate: channel.requestBodyTemplate || '',
@@ -336,6 +342,7 @@ export class LlmService {
             apiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
             openaiApiInterface: channel.apiInterface || channel.openaiApiInterface || 'chat',
             experimental: channel.experimental || {},
+            openaiResponses: channel.openaiResponses || {},
             customHeaders: channel.customHeaders || {},
             headersTemplate: channel.headersTemplate || '',
             requestBodyTemplate: channel.requestBodyTemplate || '',

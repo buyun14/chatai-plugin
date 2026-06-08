@@ -11,6 +11,21 @@ import config from '../../../config/config.js'
 
 const logger = global.logger || console
 
+function normalizePresetPayload(payload = {}) {
+    if (!payload || typeof payload !== 'object') return payload
+    if (
+        payload.tools &&
+        typeof payload.tools === 'object' &&
+        Object.prototype.hasOwnProperty.call(payload.tools, 'toolApprovalMode') &&
+        payload.tools.toolApprovalMode == null
+    ) {
+        const tools = { ...payload.tools }
+        delete tools.toolApprovalMode
+        return { ...payload, tools }
+    }
+    return payload
+}
+
 /**
  * 创建预设路由
  * @param {Function} authMiddleware - 认证中间件
@@ -55,7 +70,7 @@ export function createPresetRoutes(authMiddleware) {
         '/',
         ...auth,
         asyncHandler(async (req, res) => {
-            const preset = await presetManager.create(req.body)
+            const preset = await presetManager.create(normalizePresetPayload(req.body))
             res.status(201).json(ChaiteResponse.ok(preset))
         })
     )
@@ -81,7 +96,7 @@ export function createPresetRoutes(authMiddleware) {
                 }
             }
 
-            const preset = await presetManager.update(req.params.id, req.body)
+            const preset = await presetManager.update(req.params.id, normalizePresetPayload(req.body))
             if (preset) {
                 res.json(ChaiteResponse.ok(preset))
             } else {

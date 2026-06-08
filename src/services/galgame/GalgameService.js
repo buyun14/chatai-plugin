@@ -1091,22 +1091,6 @@ class GalgameService {
             throw err
         }
 
-        // 记录统计
-        try {
-            await statsService.recordApiCall({
-                channelId: client._channelInfo?.id || 'game',
-                channelName: client._channelInfo?.name || '游戏模式',
-                model: gameModel,
-                duration: Date.now() - startTime,
-                success: requestSuccess,
-                source: 'game',
-                userId: userId || source,
-                groupId: groupId || null
-            })
-        } catch (err) {
-            gameLogger.debug(`统计记录失败: ${err.message}`)
-        }
-
         // 提取文本响应
         const contentArray = Array.isArray(response?.content) ? response.content : []
         const aiResponse =
@@ -1114,6 +1098,25 @@ class GalgameService {
                 ?.filter(c => c.type === 'text')
                 ?.map(c => c.text)
                 ?.join('') || ''
+
+        // 记录统计
+        try {
+            await statsService.recordApiCall({
+                channelId: client._channelInfo?.id || 'game',
+                channelName: client._channelInfo?.name || '游戏模式',
+                model: gameModel,
+                reportedModel: response?.model || null,
+                duration: Date.now() - startTime,
+                success: requestSuccess,
+                source: 'game',
+                userId: userId || source,
+                groupId: groupId || null,
+                responseText: aiResponse,
+                apiUsage: response?.usage
+            })
+        } catch (err) {
+            gameLogger.debug(`统计记录失败: ${err.message}`)
+        }
 
         return { text: aiResponse, response, usage: response?.usage || {} }
     }

@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { BUILTIN_PRESETS, getPresetCategories, getBuiltinPreset } from './BuiltinPresets.js'
 import config from '../../../config/config.js'
+import { chatLogger } from '../../core/utils/logger.js'
+
+const logger = chatLogger
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -29,6 +32,9 @@ const PERSONA_DIR = path.join(DATA_DIR, 'persona')
  * @property {string} description - 描述
  * @property {string} systemPrompt - 系统提示词
  * @property {string} [model] - 指定模型
+ * @property {boolean} [enableReasoning] - 是否启用深度思考
+ * @property {string} [reasoningEffort] - 思考等级
+ * @property {number} [reasoningBudgetTokens] - 推理预算token数，0表示不指定
  * @property {ModelParams} [modelParams] - 模型参数配置
  * @property {PersonaConfig} [persona] - 人设配置
  * @property {ContextConfig} [context] - 上下文配置
@@ -170,6 +176,8 @@ export class PresetManager {
             model: '',
             disableSystemPrompt: false, // 是否禁用系统提示词
             enableReasoning: false, // 是否启用深度思考
+            reasoningEffort: 'low',
+            reasoningBudgetTokens: 0,
             modelParams: {
                 temperature: 0.7,
                 top_p: 0.9,
@@ -669,6 +677,15 @@ export class PresetManager {
         }
 
         // 深度合并嵌套对象
+        const nextTools = { ...(preset.tools || {}), ...(data.tools || {}) }
+        if (
+            data.tools &&
+            Object.prototype.hasOwnProperty.call(data.tools, 'toolApprovalMode') &&
+            data.tools.toolApprovalMode == null
+        ) {
+            delete nextTools.toolApprovalMode
+        }
+
         const updated = {
             ...preset,
             ...data,
@@ -677,7 +694,7 @@ export class PresetManager {
             modelParams: { ...(preset.modelParams || {}), ...(data.modelParams || {}) },
             persona: mergePersona(preset.persona, data.persona),
             context: { ...(preset.context || {}), ...(data.context || {}) },
-            tools: { ...(preset.tools || {}), ...(data.tools || {}) }
+            tools: nextTools
         }
 
         this.presets.set(id, updated)

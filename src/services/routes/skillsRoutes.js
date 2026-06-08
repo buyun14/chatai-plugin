@@ -21,6 +21,7 @@ import {
     toggleCategory,
     toggleTool
 } from '../agent/SkillsAgent.js'
+import { skillsLoader } from '../skills/SkillsLoader.js'
 
 const router = express.Router()
 
@@ -152,6 +153,29 @@ router.get('/tools/by-source', async (req, res) => {
                         }
                     ])
                 )
+            })
+        )
+    } catch (error) {
+        res.status(500).json(ChaiteResponse.fail(null, error.message))
+    }
+})
+
+// GET /documents - 获取 SKILL.md 文档技能
+router.get('/documents', async (req, res) => {
+    try {
+        const documents = global.chatAiSkillsLoader?.getSkillDocuments?.() || skillsLoader.getSkillDocuments()
+        res.json(
+            ChaiteResponse.ok({
+                count: documents.length,
+                documents: documents.map(document => ({
+                    name: document.name,
+                    description: document.description,
+                    triggers: document.triggers || [],
+                    allowedTools: document.allowedTools || [],
+                    disallowedTools: document.disallowedTools || [],
+                    path: document.relativePath,
+                    directory: document.directory
+                }))
             })
         )
     } catch (error) {

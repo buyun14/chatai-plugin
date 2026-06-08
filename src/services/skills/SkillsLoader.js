@@ -11,6 +11,9 @@ import { chatLogger } from '../../core/utils/logger.js'
 import { skillsConfig } from './SkillsConfig.js'
 import { mcpManager } from '../../mcp/McpManager.js'
 import { builtinMcpServer } from '../../mcp/BuiltinMcpServer.js'
+import { skillDocumentLoader } from './SkillDocumentLoader.js'
+import { getToolIdentity } from '../../core/adapters/tooling.js'
+import { hasToolPermission, resolveToolPermission } from '../tools/ToolPermission.js'
 
 const logger = chatLogger
 
@@ -40,6 +43,7 @@ class SkillsLoader {
 
         // 加载工具
         await this.loadAll()
+        await skillDocumentLoader.init(pluginRoot, skillsConfig)
 
         this.initialized = true
         logger.debug(`[SkillsLoader] 初始化完成: ${this.tools.size} 个工具, mode=${skillsConfig.getMode()}`)
@@ -91,14 +95,15 @@ class SkillsLoader {
      */
     async _loadBuiltinTools() {
         try {
-            const builtinTools = mcpManager.getTools({ applyConfig: true }).filter(t => t.isBuiltin)
+            const builtinTools = mcpManager.getTools({ applyConfig: false }).filter(t => t.isBuiltin)
 
             const enabledCategories = skillsConfig.getEnabledCategories()
             const disabledTools = skillsConfig.getDisabledTools()
 
             for (const tool of builtinTools) {
+                const identity = getToolIdentity({ ...tool, source: 'builtin' })
                 // 检查工具是否被禁用
-                if (disabledTools.includes(tool.name)) {
+                if (disabledTools.includes(tool.name) || disabledTools.includes(identity)) {
                     continue
                 }
 
@@ -124,13 +129,14 @@ class SkillsLoader {
     async _loadCustomTools() {
         try {
             const customTools = mcpManager
-                .getTools({ applyConfig: true })
+                .getTools({ applyConfig: false })
                 .filter(t => t.isJsTool || t.isCustom || t.serverName === 'custom-tools')
 
             const disabledTools = skillsConfig.getDisabledTools()
 
             for (const tool of customTools) {
-                if (disabledTools.includes(tool.name)) {
+                const identity = getToolIdentity({ ...tool, source: 'custom' })
+                if (disabledTools.includes(tool.name) || disabledTools.includes(identity)) {
                     continue
                 }
 
@@ -179,17 +185,17 @@ class SkillsLoader {
                     const serverTools = []
 
                     for (const tool of serverInfo.tools) {
-                        if (disabledTools.includes(tool.name)) {
-                            continue
-                        }
-
                         const toolData = {
                             ...tool,
                             serverName: server.name,
                             isMcpTool: true
                         }
+                        const identity = getToolIdentity({ ...toolData, source: 'mcp' })
+                        if (disabledTools.includes(tool.name) || disabledTools.includes(identity)) {
+                            continue
+                        }
                         this._addTool(toolData, 'mcp')
-                        serverTools.push(tool.name)
+                        serverTools.push(identity || tool.name)
                     }
 
                     // 记录 MCP 服务器工具信息
@@ -214,9 +220,12 @@ class SkillsLoader {
      */
     _addTool(tool, source) {
         const category = tool.category || tool.serverName || 'general'
+        const identity = getToolIdentity({ ...tool, source })
+        const key = identity || tool.name
 
-        this.tools.set(tool.name, {
+        this.tools.set(key, {
             name: tool.name,
+            identity,
             description: tool.description,
             inputSchema: tool.inputSchema || { type: 'object', properties: {} },
             category,
@@ -225,7 +234,12 @@ class SkillsLoader {
             isBuiltin: tool.isBuiltin || source === 'builtin',
             isJsTool: tool.isJsTool,
             isCustom: tool.isCustom || source === 'custom',
-            isMcpTool: tool.isMcpTool || source === 'mcp'
+            isMcpTool: tool.isMcpTool || source === 'mcp',
+            dangerous: tool.dangerous,
+            requireMaster: tool.requireMaster,
+            requiredPermission: tool.requiredPermission,
+            requirePermission: tool.requirePermission,
+            permissionRequired: tool.permissionRequired
         })
 
         // 更新类别索引
@@ -236,7 +250,7 @@ class SkillsLoader {
                 serverName: tool.serverName
             })
         }
-        this.categories.get(category).tools.push(tool.name)
+        this.categories.get(category).tools.push(key)
     }
 
     /**
@@ -261,6 +275,7 @@ class SkillsLoader {
         await skillsConfig.reload()
         await mcpManager.refreshBuiltinTools()
         await this.loadAll()
+        await skillDocumentLoader.load()
         logger.debug(`[SkillsLoader] 重新加载完成: ${this.tools.size} 个工具`)
     }
 
@@ -269,8 +284,16 @@ class SkillsLoader {
     /**
      * 获取所有工具
      */
-    getTools() {
-        return Array.from(this.tools.values())
+    getTools(options = {}) {
+        const { includeDuplicateNames = false } = options
+        const tools = Array.from(this.tools.values())
+        if (includeDuplicateNames) return tools
+
+        const byName = new Map()
+        for (const tool of tools) {
+            if (!byName.has(tool.name)) byName.set(tool.name, tool)
+        }
+        return Array.from(byName.values())
     }
 
     /**
@@ -281,17 +304,42 @@ class SkillsLoader {
     }
 
     /**
+     * 获取 SKILL.md 文档技能
+     */
+    getSkillDocuments() {
+        return skillDocumentLoader.getDocuments()
+    }
+
+    /**
+     * 获取当前请求命中的 SKILL.md 文档技能
+     */
+    getMatchingSkillDocuments(options = {}) {
+        return skillDocumentLoader.getMatchingDocuments(options)
+    }
+
+    /**
+     * 获取可注入 system prompt 的 SKILL.md 指令
+     */
+    getSkillDocumentInstructions(options = {}) {
+        return skillDocumentLoader.buildInstructions(options)
+    }
+
+    /**
      * 根据名称获取工具
      */
     getTool(name) {
-        return this.tools.get(name)
+        if (this.tools.has(name)) return this.tools.get(name)
+        for (const tool of this.tools.values()) {
+            if (tool.name === name || getToolIdentity(tool) === name) return tool
+        }
+        return undefined
     }
 
     /**
      * 判断工具是否存在
      */
     hasTool(name) {
-        return this.tools.has(name)
+        return Boolean(this.getTool(name))
     }
 
     /**
@@ -326,7 +374,7 @@ class SkillsLoader {
      */
     getToolsByCategory(category) {
         const cat = this.categories.get(category)
-        return cat ? cat.tools.map(name => this.tools.get(name)).filter(Boolean) : []
+        return cat ? cat.tools.map(name => this.getTool(name)).filter(Boolean) : []
     }
 
     /**
@@ -361,7 +409,7 @@ class SkillsLoader {
         const group = skillsConfig.getGroupByName(groupName)
         if (!group || !group.tools) return []
 
-        return group.tools.map(name => this.tools.get(name)).filter(Boolean)
+        return group.tools.map(name => this.getTool(name)).filter(Boolean)
     }
 
     /**
@@ -371,7 +419,7 @@ class SkillsLoader {
         const groups = skillsConfig.getEnabledGroups()
         return groups.map(group => ({
             ...group,
-            tools: (group.tools || []).map(name => this.tools.get(name)).filter(Boolean)
+            tools: (group.tools || []).map(name => this.getTool(name)).filter(Boolean)
         }))
     }
 
@@ -384,7 +432,7 @@ class SkillsLoader {
             index: group.index,
             name: group.name,
             description: group.description,
-            toolCount: (group.tools || []).filter(name => this.tools.has(name)).length,
+            toolCount: (group.tools || []).filter(name => this.hasTool(name)).length,
             requiredPermission: group.requiredPermission
         }))
     }
@@ -392,19 +440,21 @@ class SkillsLoader {
     /**
      * 根据工具组索引获取工具
      */
-    getToolsByGroupIndexes(indexes) {
+    getToolsByGroupIndexes(indexes, options = {}) {
         const tools = []
         const seen = new Set()
+        const userPermission = resolveToolPermission(options)
 
         for (const index of indexes) {
             const group = skillsConfig.getGroupByIndex(index)
             if (!group || !group.tools) continue
+            if (group.requiredPermission && !hasToolPermission(userPermission, group.requiredPermission)) continue
 
             for (const toolName of group.tools) {
                 if (seen.has(toolName)) continue
                 seen.add(toolName)
 
-                const tool = this.tools.get(toolName)
+                const tool = this.getTool(toolName)
                 if (tool) {
                     tools.push(tool)
                 }
@@ -439,16 +489,7 @@ class SkillsLoader {
      * 检查权限
      */
     _hasPermission(userPermission, requiredPermission) {
-        const permissionLevels = {
-            member: 0,
-            admin: 1,
-            owner: 2
-        }
-
-        const userLevel = permissionLevels[userPermission] || 0
-        const requiredLevel = permissionLevels[requiredPermission] || 0
-
-        return userLevel >= requiredLevel
+        return hasToolPermission(userPermission, requiredPermission)
     }
 
     /**
@@ -496,7 +537,7 @@ class SkillsLoader {
             }
         }
 
-        return tools.filter(tool => allowedTools.has(tool.name))
+        return tools.filter(tool => allowedTools.has(tool.name) || allowedTools.has(getToolIdentity(tool)))
     }
 }
 

@@ -1,9 +1,13 @@
-import { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from '@google/generative-ai'
+import { FunctionCallingMode, GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from '@google/generative-ai'
 import crypto from 'node:crypto'
+import { chatLogger } from '../../utils/logger.js'
 import { AbstractClient, preprocessImageUrls, parseXmlToolCalls } from '../AbstractClient.js'
 import { getFromChaiteConverter, getFromChaiteToolConverter, getIntoChaiteConverter } from '../../utils/converter.js'
 import './converter.js'
 import { statsService } from '../../../services/stats/StatsService.js'
+import { resolveToolChoice } from '../tooling.js'
+
+const logger = chatLogger
 
 /**
  * @typedef {import('../../types').BaseClientOptions} BaseClientOptions
@@ -23,15 +27,34 @@ function getGeminiThinkingConfig(options = {}, clientOptions = {}) {
     const enableReasoning = options.enableReasoning ?? clientOptions.enableReasoning ?? false
     if (!enableReasoning) return undefined
     const effort = options.reasoningEffort ?? clientOptions.reasoningEffort ?? 'low'
+    if (effort === 'none' || effort === 'auto') return undefined
     const effortBudgetMap = {
         minimal: 256,
         low: 1024,
         medium: 4096,
-        high: 8192
+        high: 8192,
+        xhigh: 16384
     }
     const thinkingBudget =
         options.reasoningBudgetTokens ?? clientOptions.reasoningBudgetTokens ?? effortBudgetMap[effort] ?? 1024
     return { thinkingBudget }
+}
+
+function normalizeGeminiToolConfig(toolConfig) {
+    if (!toolConfig?.functionCallingConfig) return toolConfig
+    const mode = toolConfig.functionCallingConfig.mode
+    const modeMap = {
+        AUTO: FunctionCallingMode.AUTO,
+        ANY: FunctionCallingMode.ANY,
+        NONE: FunctionCallingMode.NONE,
+        MODE_UNSPECIFIED: FunctionCallingMode.MODE_UNSPECIFIED
+    }
+    return {
+        functionCallingConfig: {
+            ...toolConfig.functionCallingConfig,
+            mode: modeMap[mode] || mode
+        }
+    }
 }
 
 export class GeminiClient extends AbstractClient {
@@ -122,7 +145,11 @@ export class GeminiClient extends AbstractClient {
 
         // 转换工具
         const toolConvert = getFromChaiteToolConverter('gemini')
-        const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const choiceResolution = resolveToolChoice(options, convertedTools, 'gemini')
+        const tools = choiceResolution.tools.length > 0 ? choiceResolution.tools : undefined
+        const toolConfig = tools ? normalizeGeminiToolConfig(choiceResolution.toolConfig) : undefined
+        options._exposedTools = tools || []
 
         const generationConfig = {
             temperature: options.temperature,
@@ -138,6 +165,7 @@ export class GeminiClient extends AbstractClient {
                 systemInstruction: systemInstruction || undefined,
                 safetySettings,
                 tools: tools ? [{ functionDeclarations: tools }] : undefined,
+                toolConfig,
                 generationConfig
             },
             requestOptions
@@ -190,12 +218,17 @@ export class GeminiClient extends AbstractClient {
             completionTokens: response.usageMetadata?.candidatesTokenCount,
             totalTokens: response.usageMetadata?.totalTokenCount,
             cachedTokens: response.usageMetadata?.cachedContentTokenCount || 0,
+            cacheReadTokens: response.usageMetadata?.cachedContentTokenCount || 0,
+            cacheReadCount: response.usageMetadata?.cachedContentTokenCount > 0 ? 1 : 0,
+            cacheWriteTokens: 0,
+            cacheWriteCount: 0,
             reasoningTokens: response.usageMetadata?.thoughtsTokenCount || 0
         }
 
         return {
             id,
             parentId: options.parentMessageId,
+            model,
             role: 'assistant',
             content: responseContents,
             toolCalls,
@@ -273,7 +306,11 @@ export class GeminiClient extends AbstractClient {
         ]
 
         const toolConvert = getFromChaiteToolConverter('gemini')
-        const tools = this.tools.length > 0 ? this.tools.map(toolConvert) : undefined
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const choiceResolution = resolveToolChoice(options, convertedTools, 'gemini')
+        const tools = choiceResolution.tools.length > 0 ? choiceResolution.tools : undefined
+        const toolConfig = tools ? normalizeGeminiToolConfig(choiceResolution.toolConfig) : undefined
+        options._exposedTools = tools || []
 
         const generationConfig = {
             temperature: options.temperature,
@@ -288,6 +325,7 @@ export class GeminiClient extends AbstractClient {
                 systemInstruction: systemInstruction || undefined,
                 safetySettings,
                 tools: tools ? [{ functionDeclarations: tools }] : undefined,
+                toolConfig,
                 generationConfig
             },
             requestOptions
@@ -298,11 +336,29 @@ export class GeminiClient extends AbstractClient {
         })
 
         async function* generator() {
+            const toolCalls = []
             for await (const chunk of result.stream) {
                 const text = chunk.text()
                 if (text) {
-                    yield text
+                    yield { type: 'text', text }
                 }
+                const functionCalls = chunk.functionCalls?.() || []
+                for (const functionCall of functionCalls) {
+                    toolCalls.push({
+                        id: crypto.randomUUID(),
+                        type: 'function',
+                        function: {
+                            name: functionCall.name,
+                            arguments:
+                                typeof functionCall.args === 'string'
+                                    ? functionCall.args
+                                    : JSON.stringify(functionCall.args || {})
+                        }
+                    })
+                }
+            }
+            if (toolCalls.length > 0) {
+                yield { type: 'tool_calls', toolCalls }
             }
         }
 

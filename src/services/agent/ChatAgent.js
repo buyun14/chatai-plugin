@@ -16,6 +16,11 @@ import historyManager from '../../core/utils/history.js'
 import config from '../../../config/config.js'
 import { enforceMaxCharacters } from '../../utils/common.js'
 import { SkillsAgent, convertMcpTools } from './SkillsAgent.js'
+import { resolveConfiguredToolChoice } from '../tools/ToolChoiceService.js'
+import { resolveThinkingOptions as resolveConfiguredThinkingOptions } from '../llm/ThinkingOptions.js'
+import { attachToolMetadata } from '../../core/adapters/tooling.js'
+import { applySkillToolConstraints, getSkillToolConstraints } from '../skills/SkillToolConstraints.js'
+import { resolveToolPermission } from '../tools/ToolPermission.js'
 let _scopeManager = null
 async function ensureScopeManager() {
     if (!_scopeManager) {
@@ -52,6 +57,7 @@ export class ChatAgent {
         this.enableSkills = options.enableSkills !== false
         this.stream = options.stream || false
         this.debugMode = options.debugMode || false
+        this.userPermission = resolveToolPermission(options)
 
         this.skillsAgent = null
         this.conversationId = null
@@ -82,7 +88,9 @@ export class ChatAgent {
                 event: this.event,
                 bot: this.bot,
                 userId: this.userId,
-                groupId: this.groupId
+                groupId: this.groupId,
+                presetId: this.presetId || 'default',
+                userPermission: this.userPermission
             })
             await this.skillsAgent.init()
         }
@@ -232,14 +240,42 @@ export class ChatAgent {
         const effectivePresetId =
             presetId || preset?.id || scopePresetId || config.get('llm.defaultChatPresetId') || 'default'
         const currentPreset = preset || presetManager.get(effectivePresetId)
+        const userPermission = resolveToolPermission({
+            event,
+            userId: cleanUserId || this.userId,
+            userPermission: this.userPermission
+        })
+        if (this.enableSkills) {
+            const agentNeedsRebuild =
+                !this.skillsAgent ||
+                this.skillsAgent.presetId !== effectivePresetId ||
+                String(this.skillsAgent.groupId || '') !== String(groupId || this.groupId || '') ||
+                String(this.skillsAgent.userId || '') !== String(cleanUserId || this.userId || '') ||
+                this.skillsAgent.userPermission !== userPermission
+            if (agentNeedsRebuild) {
+                this.skillsAgent = new SkillsAgent({
+                    event,
+                    bot: this.bot,
+                    userId: cleanUserId || this.userId,
+                    groupId: groupId || this.groupId,
+                    presetId: effectivePresetId,
+                    userPermission
+                })
+                await this.skillsAgent.init()
+            }
+        }
 
         // 确定是否启用工具
         const presetEnableTools = currentPreset?.tools?.enableBuiltinTools !== false
         const scopeToolsEnabled = scopeFeatures.toolsEnabled !== false
-        const toolsAllowed = !disableTools && presetEnableTools && scopeToolsEnabled
+        const globalToolApprovalMode = config.get('builtinTools.approvalMode') || 'auto'
+        const presetToolApprovalMode = currentPreset?.tools?.toolApprovalMode || currentPreset?.toolApprovalMode
+        const toolApprovalMode = scopeFeatures.toolApprovalMode || presetToolApprovalMode || globalToolApprovalMode
+        const toolsAllowed = !disableTools && presetEnableTools && scopeToolsEnabled && toolApprovalMode !== 'ask'
 
         // 加载工具（支持 ToolGroupManager 分组调度）
         let allTools = []
+        const skillToolConstraints = getSkillToolConstraints({ message })
         if (toolsAllowed && this.skillsAgent) {
             // 从 SkillsConfig 获取 dispatch 配置（优先），回退到 config.get
             const dispatchConfig = this._getDispatchConfig()
@@ -247,13 +283,19 @@ export class ChatAgent {
 
             if (dispatchEnabled && typeof message === 'string') {
                 // 使用 ToolGroupManager 分组调度
-                allTools = await this._dispatchTools(message, event, dispatchConfig)
+                allTools = await this._dispatchTools(message, event, dispatchConfig, {
+                    presetId: effectivePresetId,
+                    groupId: groupId || this.groupId,
+                    userId: cleanUserId || this.userId,
+                    userPermission
+                })
             }
 
             // 回退：调度未启用或调度返回空 -> 使用全量工具
             if (allTools.length === 0 && !dispatchEnabled) {
                 allTools = this.skillsAgent.getExecutableSkills()
             }
+            allTools = applySkillToolConstraints(allTools, skillToolConstraints)
             logger.debug(`[ChatAgent] 加载技能: ${allTools.length}个${dispatchEnabled ? ' (调度模式)' : ''}`)
         }
 
@@ -306,6 +348,15 @@ export class ChatAgent {
         if (!channel) {
             throw new Error(`未找到可用的渠道，请检查模型配置: ${llmModel}`)
         }
+        const resolveToolChoiceForChannel = targetChannel => {
+            if (!toolsAllowed) return { type: 'none' }
+            return resolveConfiguredToolChoice({
+                requestOptions: options,
+                preset: currentPreset,
+                channel: targetChannel
+            })
+        }
+        const configuredToolChoice = resolveToolChoiceForChannel(channel)
 
         // 收集渠道调试信息
         if (debugInfo && channel) {
@@ -356,6 +407,15 @@ export class ChatAgent {
             systemPrompt = this._addGroupContext(systemPrompt, groupId, event, userId)
         }
 
+        // 添加真实 SKILL.md 文档技能说明
+        const skillDocumentInstructions = global.chatAiSkillsLoader?.getSkillDocumentInstructions?.({
+            message
+        })
+        if (!skipPersona && skillDocumentInstructions) {
+            systemPrompt += '\n\n' + skillDocumentInstructions
+            logger.debug(`[ChatAgent] 已添加 SKILL.md 文档技能指令 (${skillDocumentInstructions.length} 字符)`)
+        }
+
         // 添加工具能力提示词（当有工具可用时）
         if (allTools.length > 0) {
             systemPrompt = this._addToolPrompt(systemPrompt, allTools)
@@ -388,7 +448,9 @@ export class ChatAgent {
             event,
             presetId: effectivePresetId,
             tools: taggedTools,
-            preset: currentPreset
+            preset: currentPreset,
+            toolChoice: configuredToolChoice,
+            userPermission
         })
 
         const client = await LlmService.createClient(clientOptions)
@@ -396,27 +458,17 @@ export class ChatAgent {
         // 请求参数
         const channelAdvanced = channel?.advanced || {}
         const channelLlm = channelAdvanced.llm || {}
-        const channelThinking = channelAdvanced.thinking || {}
-        const effectiveEnableReasoning =
-            config.get('thinking.enabled') !== false
-                ? (currentPreset?.enableReasoning ?? channelThinking.enableReasoning)
-                : false
 
         /* 字符上限检查 */
         const maxCharacters = channelLlm.maxCharacters || 0
         enforceMaxCharacters(messages, maxCharacters, 'ChatAgent')
         const channelStreaming = channelAdvanced.streaming || {}
-        const resolveThinkingOptions = targetChannel => {
-            const thinking = targetChannel?.advanced?.thinking || {}
-            return {
-                enableReasoning:
-                    config.get('thinking.enabled') !== false
-                        ? (currentPreset?.enableReasoning ?? thinking.enableReasoning)
-                        : false,
-                reasoningEffort: thinking.defaultLevel || 'low',
-                thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
-            }
-        }
+        const resolveThinkingOptions = targetChannel =>
+            resolveConfiguredThinkingOptions({
+                requestOptions: options,
+                preset: currentPreset,
+                channel: targetChannel
+            })
         const thinkingOptions = resolveThinkingOptions(channel)
         const presetParams = currentPreset?.modelParams || {}
 
@@ -438,14 +490,24 @@ export class ChatAgent {
             systemOverride: systemPrompt,
             stream: stream || channelStreaming.enabled === true,
             disableHistoryRead: skipHistory,
-            ...thinkingOptions
+            ...thinkingOptions,
+            event,
+            presetId: effectivePresetId,
+            userPermission,
+            groupId,
+            userId: cleanUserId || userId,
+            toolApprovalMode,
+            ...(configuredToolChoice ? { toolChoice: configuredToolChoice } : {}),
+            ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+            ...(options.responsesToolChoice !== undefined ? { responsesToolChoice: options.responsesToolChoice } : {}),
+            ...(options.responseToolChoice !== undefined ? { responseToolChoice: options.responseToolChoice } : {})
         }
 
         logger.info(`[ChatAgent] 模型: ${llmModel}, 工具: ${allTools.length}个`)
 
         // 发送请求（带回退）
         const requestStartTime = Date.now()
-        let response, finalUsage, allToolLogs, lastError
+        let response, finalUsage, allToolLogs, lastError, upstreamReportedModel
 
         try {
             const result = await this._sendWithFallback(client, userMessage, requestOptions, {
@@ -453,11 +515,13 @@ export class ChatAgent {
                 clientOptions,
                 llmModel,
                 debugInfo,
-                resolveThinkingOptions
+                resolveThinkingOptions,
+                resolveToolChoiceForChannel
             })
 
             response = result.response
             finalUsage = result.usage
+            upstreamReportedModel = result.reportedModel
             allToolLogs = result.toolLogs || []
         } catch (error) {
             lastError = error
@@ -470,6 +534,7 @@ export class ChatAgent {
                 requestStartTime,
                 response,
                 finalUsage,
+                upstreamReportedModel,
                 lastError,
                 userId,
                 groupId,
@@ -632,7 +697,7 @@ export class ChatAgent {
      * @param {Object} dispatchConfig - 调度配置
      * @returns {Array} 调度后的工具列表
      */
-    async _dispatchTools(message, event, dispatchConfig = {}) {
+    async _dispatchTools(message, event, dispatchConfig = {}, contextOptions = {}) {
         try {
             const { toolGroupManager } = await import('../tools/ToolGroupManager.js')
             await toolGroupManager.init()
@@ -647,8 +712,8 @@ export class ChatAgent {
 
             // 构建调度提示词（根据 useSummary 决定是否使用摘要模式）
             const dispatchPrompt = useSummary
-                ? toolGroupManager.buildDispatchPrompt()
-                : this._buildFullDispatchPrompt(toolGroupManager)
+                ? toolGroupManager.buildDispatchPrompt(contextOptions)
+                : this._buildFullDispatchPrompt(toolGroupManager, contextOptions)
 
             // 用轻量模型做调度判断
             const dispatchModel =
@@ -682,7 +747,7 @@ export class ChatAgent {
                     .map(c => c.text)
                     .join('') || ''
 
-            const dispatchResult = toolGroupManager.parseDispatchResponseV2(responseText, message)
+            const dispatchResult = toolGroupManager.parseDispatchResponseV2(responseText, message, contextOptions)
             logger.debug(
                 `[ChatAgent] 调度结果: 分析="${dispatchResult.analysis}", 工具组=[${dispatchResult.toolGroups.join(',')}]`
             )
@@ -696,8 +761,14 @@ export class ChatAgent {
                 }
 
                 // 按组获取工具，传入用户权限做组级权限检查
-                const userPermission = event?.sender?.role || 'member'
-                const groupTools = await toolGroupManager.getToolsByGroupIndexes(selectedGroups, { userPermission })
+                const userPermission = resolveToolPermission({
+                    ...contextOptions,
+                    event
+                })
+                const groupTools = await toolGroupManager.getToolsByGroupIndexes(selectedGroups, {
+                    ...contextOptions,
+                    userPermission
+                })
                 if (groupTools.length > 0) {
                     // 包装为可执行格式（与 getExecutableSkills 一致）
                     const executableTools = convertMcpTools(groupTools, {
@@ -729,8 +800,8 @@ export class ChatAgent {
     /**
      * 构建完整模式的调度提示词（useSummary=false 时使用，列出每个工具的详细信息）
      */
-    _buildFullDispatchPrompt(toolGroupManager) {
-        const summary = toolGroupManager.getGroupSummary()
+    _buildFullDispatchPrompt(toolGroupManager, contextOptions = {}) {
+        const summary = toolGroupManager.getGroupSummary(contextOptions)
         let prompt = `你是智能任务调度器。分析用户请求，选择需要的工具组。原则：只要请求可能需要数据或操作，就选择工具组；只有纯问候闲聊才用 chat。
 
 ## 可用工具组：
@@ -1035,13 +1106,16 @@ export class ChatAgent {
                 // 避免重复标签
                 if (origDesc.startsWith(`[${groupLabel}]`)) return tool
 
-                return {
-                    ...tool,
-                    function: {
-                        ...tool.function,
-                        description: `[${groupLabel}] ${origDesc}`
-                    }
-                }
+                return attachToolMetadata(
+                    {
+                        ...tool,
+                        function: {
+                            ...tool.function,
+                            description: `[${groupLabel}] ${origDesc}`
+                        }
+                    },
+                    tool
+                )
             })
         } catch (err) {
             logger.debug(`[ChatAgent] 工具分组标签注入失败: ${err.message}`)
@@ -1053,14 +1127,20 @@ export class ChatAgent {
      * 构建客户端选项
      */
     async _buildClientOptions(options) {
-        const { model, channel, adapterType, event, presetId, tools, preset } = options
+        const { model, channel, adapterType, event, presetId, tools, preset, toolChoice } = options
 
         const clientOptions = {
             enableTools: tools?.length > 0,
             preSelectedTools: tools?.length > 0 ? tools : null,
             event,
             presetId,
-            userPermission: event?.sender?.role || 'member'
+            userPermission: resolveToolPermission({
+                event,
+                userPermission: options.userPermission
+            })
+        }
+        if (toolChoice !== undefined && toolChoice !== null) {
+            clientOptions.toolChoice = toolChoice
         }
 
         if (channel) {
@@ -1089,6 +1169,9 @@ export class ChatAgent {
             if (channel.experimental) {
                 clientOptions.experimental = channel.experimental
             }
+            if (channel.openaiResponses) {
+                clientOptions.openaiResponses = channel.openaiResponses
+            }
             if (channel.customHeaders) {
                 clientOptions.customHeaders = channel.customHeaders
             }
@@ -1100,11 +1183,13 @@ export class ChatAgent {
 
         const channelAdvanced = channel?.advanced || {}
         if (channelAdvanced.thinking) {
-            const chT = channelAdvanced.thinking
-            clientOptions.enableReasoning =
-                config.get('thinking.enabled') !== false ? (preset?.enableReasoning ?? chT.enableReasoning) : false
-            clientOptions.reasoningEffort = chT.defaultLevel || 'low'
-            clientOptions.thinkingVendorControl = chT.vendorThinkingControl ?? 'auto'
+            Object.assign(
+                clientOptions,
+                resolveConfiguredThinkingOptions({
+                    preset,
+                    channel
+                })
+            )
         }
 
         return clientOptions
@@ -1114,7 +1199,8 @@ export class ChatAgent {
      * 发送请求（带回退）
      */
     async _sendWithFallback(client, userMessage, requestOptions, context) {
-        const { channel, clientOptions, llmModel, debugInfo, resolveThinkingOptions } = context
+        const { channel, clientOptions, llmModel, debugInfo, resolveThinkingOptions, resolveToolChoiceForChannel } =
+            context
 
         const fallbackConfig = config.get('llm.fallback') || {}
         const fallbackEnabled = fallbackConfig.enabled !== false
@@ -1150,7 +1236,9 @@ export class ChatAgent {
                         apiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                         openaiApiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                         experimental: currentChannel.experimental || {},
-                        ...resolveThinkingOptions(currentChannel)
+                        openaiResponses: currentChannel.openaiResponses || {},
+                        ...resolveThinkingOptions(currentChannel),
+                        toolChoice: resolveToolChoiceForChannel(currentChannel)
                     }
                     currentClient = await LlmService.createClient(newClientOptions)
                 }
@@ -1165,7 +1253,8 @@ export class ChatAgent {
                     const currentRequestOptions = {
                         ...requestOptions,
                         ...resolveThinkingOptions(currentChannel),
-                        model: mapping.actualModel
+                        model: mapping.actualModel,
+                        toolChoice: resolveToolChoiceForChannel(currentChannel)
                     }
                     response = await currentClient.sendMessage(userMessage, currentRequestOptions)
 
@@ -1177,6 +1266,7 @@ export class ChatAgent {
                         return {
                             response: response.contents || [],
                             usage: response.usage || {},
+                            reportedModel: response.model || null,
                             toolLogs: response.toolCallLogs || []
                         }
                     }
@@ -1232,6 +1322,7 @@ export class ChatAgent {
             requestStartTime,
             response,
             finalUsage,
+            upstreamReportedModel,
             lastError,
             userId,
             groupId,
@@ -1264,6 +1355,7 @@ export class ChatAgent {
                 channelId: channel?.id || `no-channel-${llmModel}`,
                 channelName: channel?.name || `无渠道(${llmModel})`,
                 model: llmModel,
+                reportedModel: upstreamReportedModel,
                 duration: requestDuration,
                 success: !!response?.length,
                 error: !response?.length ? lastError?.message : null,

@@ -509,7 +509,8 @@ ${contextText}
 
             const response = {
                 contents: chatResult.response || [],
-                usage: chatResult.usage
+                usage: chatResult.usage,
+                model: chatResult.model
             }
 
             const replyText = response.contents
@@ -522,6 +523,7 @@ ${contextText}
                     channelId: 'bym',
                     channelName: '伪人模式',
                     model: bymModel,
+                    reportedModel: response.model || null,
                     duration: Date.now() - bymStartTime,
                     success: !!replyText,
                     source: 'bym',

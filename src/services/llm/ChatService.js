@@ -12,14 +12,17 @@ import { contextManager } from './ContextManager.js'
 import { channelManager } from './ChannelManager.js'
 import historyManager from '../../core/utils/history.js'
 import config from '../../../config/config.js'
-import { setToolContext } from '../../core/utils/toolAdapter.js'
+import { getAllTools, setToolContext } from '../../core/utils/toolAdapter.js'
 import { presetManager } from '../preset/PresetManager.js'
 import { memoryManager } from '../storage/MemoryManager.js'
-import { mcpManager } from '../../mcp/McpManager.js'
 import { getScopeManager } from '../scope/ScopeManager.js'
 import { databaseService } from '../storage/DatabaseService.js'
 import { statsService } from '../stats/StatsService.js'
 import { enforceMaxCharacters } from '../../utils/common.js'
+import { resolveConfiguredToolChoice } from '../tools/ToolChoiceService.js'
+import { resolveThinkingOptions as resolveConfiguredThinkingOptions } from './ThinkingOptions.js'
+import { applySkillToolConstraints, getSkillToolConstraints } from '../skills/SkillToolConstraints.js'
+import { resolveToolPermission } from '../tools/ToolPermission.js'
 
 let scopeManager = null
 const ensureScopeManager = async () => {
@@ -160,7 +163,6 @@ export class ChatService {
 
         // 初始化服务
         await contextManager.init()
-        await mcpManager.init()
 
         // 从选项或事件中获取群组ID以实现正确隔离
         const groupId = options.groupId || event?.group_id || event?.data?.group_id || null
@@ -414,14 +416,25 @@ export class ChatService {
         const globalToolApprovalMode = config.get('builtinTools.approvalMode') || 'auto'
         const presetToolApprovalMode = currentPreset?.tools?.toolApprovalMode || currentPreset?.toolApprovalMode
         const toolApprovalMode = scopeFeatures.toolApprovalMode || presetToolApprovalMode || globalToolApprovalMode
+        const userPermission = resolveToolPermission({
+            event,
+            userId: event?.user_id || userId
+        })
         const toolsAllowed = !disableTools && presetEnableTools && scopeToolsEnabled && toolApprovalMode !== 'ask'
         const hasImages = images.length > 0
         let allTools = []
+        const skillToolConstraints = getSkillToolConstraints({ message })
 
         // 简化逻辑：直接根据配置决定是否加载工具
         if (toolsAllowed) {
-            await mcpManager.init()
-            allTools = mcpManager.getTools({ applyConfig: true })
+            allTools = await getAllTools({
+                event,
+                presetId: effectivePresetIdForModel,
+                userPermission,
+                groupId,
+                userId: event?.user_id || userId
+            })
+            allTools = applySkillToolConstraints(allTools, skillToolConstraints)
             logger.debug(`[ChatService] 加载工具: ${allTools.length}个`)
         } else if (toolApprovalMode === 'ask') {
             logger.debug('[ChatService] ask 模式：不向模型暴露工具')
@@ -510,29 +523,33 @@ export class ChatService {
         // 渠道高级配置
         const channelAdvanced = channel?.advanced || {}
         const channelLlm = channelAdvanced.llm || {}
-        const channelThinking = channelAdvanced.thinking || {}
         const channelStreaming = channelAdvanced.streaming || {}
-        const resolveThinkingOptions = targetChannel => {
-            const thinking = targetChannel?.advanced?.thinking || {}
-            return {
-                enableReasoning:
-                    config.get('thinking.enabled') !== false
-                        ? (preset?.enableReasoning ?? thinking.enableReasoning)
-                        : false,
-                reasoningEffort: thinking.defaultLevel || 'low',
-                thinkingVendorControl: thinking.vendorThinkingControl ?? 'auto'
-            }
-        }
+        const resolveThinkingOptions = targetChannel =>
+            resolveConfiguredThinkingOptions({
+                requestOptions: options,
+                preset: currentPreset,
+                channel: targetChannel
+            })
         const thinkingOptions = resolveThinkingOptions(channel)
         const effectiveEnableReasoning = thinkingOptions.enableReasoning
+        const resolveToolChoiceForChannel = targetChannel => {
+            if (!toolsAllowed) return { type: 'none' }
+            return resolveConfiguredToolChoice({
+                requestOptions: options,
+                preset: currentPreset,
+                channel: targetChannel
+            })
+        }
+        const configuredToolChoice = resolveToolChoiceForChannel(channel)
         const clientOptions = {
             enableTools: actualEnableTools,
             preSelectedTools: actualTools.length > 0 ? actualTools : null,
+            ...(configuredToolChoice ? { toolChoice: configuredToolChoice } : {}),
             ...thinkingOptions,
             adapterType: adapterType,
             event,
             presetId: effectivePresetId,
-            userPermission: event?.sender?.role || 'member',
+            userPermission,
             groupId,
             userId: event?.user_id || userId,
             conversationId,
@@ -575,6 +592,9 @@ export class ChatService {
             if (channel.experimental) {
                 clientOptions.experimental = channel.experimental
             }
+            if (channel.openaiResponses) {
+                clientOptions.openaiResponses = channel.openaiResponses
+            }
             // 传递渠道的自定义请求头
             if (channel.customHeaders && Object.keys(channel.customHeaders).length > 0) {
                 clientOptions.customHeaders = channel.customHeaders
@@ -611,13 +631,18 @@ export class ChatService {
                 name: preset?.name || effectivePresetId,
                 hasSystemPrompt: !!preset?.systemPrompt,
                 enableTools: preset?.tools?.enableBuiltinTools !== false,
-                enableReasoning: preset?.enableReasoning,
+                enableReasoning: currentPreset?.enableReasoning,
+                reasoningEffort: currentPreset?.reasoningEffort,
+                reasoningBudgetTokens: currentPreset?.reasoningBudgetTokens,
                 toolsConfig: preset?.tools
                     ? {
                           enableBuiltinTools: preset.tools.enableBuiltinTools,
                           enableMcpTools: preset.tools.enableMcpTools,
                           allowedTools: preset.tools.allowedTools?.slice(0, 10),
-                          blockedTools: preset.tools.blockedTools?.slice(0, 10)
+                          disabledTools: preset.tools.disabledTools?.slice(0, 10),
+                          allowedMcpServers: preset.tools.allowedMcpServers?.slice(0, 10),
+                          disabledMcpServers: preset.tools.disabledMcpServers?.slice(0, 10),
+                          toolApprovalMode: preset.tools.toolApprovalMode
                       }
                     : null,
                 isNewSession,
@@ -822,6 +847,13 @@ export class ChatService {
                 logger.debug(`[ChatService] 全局提示词已追加应用`)
             }
         }
+        const skillDocumentInstructions = global.chatAiSkillsLoader?.getSkillDocumentInstructions?.({
+            message
+        })
+        if (!skipPersona && skillDocumentInstructions) {
+            systemPrompt += '\n\n' + skillDocumentInstructions
+            logger.debug(`[ChatService] 已添加 SKILL.md 文档技能指令 (${skillDocumentInstructions.length} 字符)`)
+        }
         let validHistory = history.filter(msg => {
             if (msg.role === 'assistant') {
                 if (!msg.content || msg.content.length === 0) return false
@@ -898,6 +930,7 @@ export class ChatService {
         // 追踪实际使用的模型和渠道（用于统计记录，即使 debugMode=false 也需要）
         let actualUsedModel = llmModel
         let actualUsedChannel = channel
+        let upstreamReportedModel = null
         let actualFallbackUsed = false
         let actualChannelSwitched = false
         let actualTotalRetryCount = 0
@@ -930,10 +963,14 @@ export class ChatService {
             ...thinkingOptions,
             event,
             presetId: effectivePresetId,
-            userPermission: event?.sender?.role || 'member',
+            userPermission,
             groupId,
             userId: event?.user_id || userId,
-            toolApprovalMode
+            toolApprovalMode,
+            ...(configuredToolChoice ? { toolChoice: configuredToolChoice } : {}),
+            ...(options.tool_choice !== undefined ? { tool_choice: options.tool_choice } : {}),
+            ...(options.responsesToolChoice !== undefined ? { responsesToolChoice: options.responsesToolChoice } : {}),
+            ...(options.responseToolChoice !== undefined ? { responseToolChoice: options.responseToolChoice } : {})
         }
         const tempSource =
             overrideTemperature !== undefined
@@ -1115,7 +1152,9 @@ export class ChatService {
                             openaiApiInterface:
                                 currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                             experimental: currentChannel.experimental || {},
-                            ...resolveThinkingOptions(currentChannel)
+                            openaiResponses: currentChannel.openaiResponses || {},
+                            ...resolveThinkingOptions(currentChannel),
+                            toolChoice: resolveToolChoiceForChannel(currentChannel)
                         }
                         currentClient = await LlmService.createClient(fallbackClientOptions)
 
@@ -1144,9 +1183,13 @@ export class ChatService {
                             const currentRequestOptions = {
                                 ...requestOptions,
                                 ...resolveThinkingOptions(currentChannel),
-                                model: currentModelMapping.actualModel
+                                model: currentModelMapping.actualModel,
+                                toolChoice: resolveToolChoiceForChannel(currentChannel)
                             }
                             response = await currentClient.sendMessage(userMessage, currentRequestOptions)
+                            if (response?.model) {
+                                upstreamReportedModel = response.model
+                            }
 
                             const hasToolCallLogs = response?.toolCallLogs?.length > 0
                             const hasContents = response?.contents?.length > 0
@@ -1166,7 +1209,7 @@ export class ChatService {
                                 }
 
                                 // 成功
-                                usedModel = currentModel
+                                usedModel = currentRequestOptions.model
                                 usedChannel = currentChannel
                                 if (!isMainModel) {
                                     fallbackUsed = true
@@ -1215,7 +1258,8 @@ export class ChatService {
                                     const newClientOptions = {
                                         ...clientOptions,
                                         apiKey: nextKey.key,
-                                        keyIndex: nextKey.keyIndex
+                                        keyIndex: nextKey.keyIndex,
+                                        toolChoice: resolveToolChoiceForChannel(currentChannel)
                                     }
                                     currentClient = await LlmService.createClient(newClientOptions)
                                     emptyRetryCount = 0 // 重置空响应计数
@@ -1266,7 +1310,9 @@ export class ChatService {
                                         openaiApiInterface:
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         experimental: altChannel.experimental || {},
-                                        ...resolveThinkingOptions(altChannel)
+                                        openaiResponses: altChannel.openaiResponses || {},
+                                        ...resolveThinkingOptions(altChannel),
+                                        toolChoice: resolveToolChoiceForChannel(altChannel)
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     emptyRetryCount = 0
@@ -1354,7 +1400,8 @@ export class ChatService {
                                     const newClientOptions = {
                                         ...clientOptions,
                                         apiKey: nextKey.key,
-                                        keyIndex: nextKey.keyIndex
+                                        keyIndex: nextKey.keyIndex,
+                                        toolChoice: resolveToolChoiceForChannel(currentChannel)
                                     }
                                     currentClient = await LlmService.createClient(newClientOptions)
                                     errorSwitched = true
@@ -1404,7 +1451,9 @@ export class ChatService {
                                         openaiApiInterface:
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         experimental: altChannel.experimental || {},
-                                        ...resolveThinkingOptions(altChannel)
+                                        openaiResponses: altChannel.openaiResponses || {},
+                                        ...resolveThinkingOptions(altChannel),
+                                        toolChoice: resolveToolChoiceForChannel(altChannel)
                                     }
                                     currentClient = await LlmService.createClient(altClientOptions)
                                     errorSwitched = true
@@ -1608,6 +1657,7 @@ export class ChatService {
                     channelId: usedChannelForStats?.id || `no-channel-${llmModel}`,
                     channelName: usedChannelForStats?.name || `无渠道(${llmModel})`,
                     model: actualUsedModel || llmModel,
+                    reportedModel: upstreamReportedModel,
                     keyIndex: keyInfo.keyIndex ?? -1,
                     keyName: keyInfo.keyName || '',
                     strategy: keyInfo.strategy || '',
@@ -1731,7 +1781,8 @@ export class ChatService {
             conversationId,
             response: finalResponse || [],
             usage: finalUsage || {},
-            model: llmModel,
+            model: upstreamReportedModel || llmModel,
+            requestedModel: llmModel,
             toolCallLogs: allToolLogs,
             debugInfo, // 调试信息（仅在 debugMode 时有值）
             autoEndInfo // 自动结束信息（如果触发）

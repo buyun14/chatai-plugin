@@ -4,6 +4,7 @@
  */
 
 import { segment } from '../../utils/messageParser.js'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 
 const activeReminders = new Map()
 

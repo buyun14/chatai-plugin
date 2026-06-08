@@ -3,6 +3,9 @@ const logger = chatLogger
 import config from '../../../config/config.js'
 import { mcpManager } from '../../mcp/McpManager.js'
 import { toolCategories } from '../../mcp/tools/index.js'
+import { toolFilterService } from './ToolFilterService.js'
+import { getToolIdentity } from '../../core/adapters/tooling.js'
+import { hasToolPermission, resolveToolPermission } from './ToolPermission.js'
 
 /**
  * 工具组管理器
@@ -26,6 +29,16 @@ export class ToolGroupManager {
         this.mcpServerGroups = new Map() // MCP服务器工具组
         this.initialized = false
         this._skillsConfig = null
+    }
+
+    hasPermissionContext(options = {}) {
+        return Boolean(
+            options.userPermission ||
+            options.senderRole ||
+            options.userId ||
+            options.isMaster !== undefined ||
+            options.event
+        )
     }
 
     /**
@@ -150,7 +163,9 @@ export class ToolGroupManager {
                 name: `mcp_${server.name}`,
                 displayName: `MCP: ${server.name}`,
                 description: `外部MCP服务器 ${server.name} 提供的工具`,
-                tools: serverInfo.tools.map(t => t.name),
+                tools: serverInfo.tools.map(
+                    t => getToolIdentity({ ...t, serverName: server.name, source: 'mcp' }) || t.name
+                ),
                 enabled: true,
                 source: 'mcp',
                 serverName: server.name,
@@ -179,6 +194,10 @@ export class ToolGroupManager {
         for (const [index, group] of this.groups) {
             if (!includeDisabled && !group.enabled) continue
             if (!includeMcp && group.source === 'mcp') continue
+            if (group.requiredPermission && this.hasPermissionContext(options)) {
+                const userPermission = resolveToolPermission(options)
+                if (!hasToolPermission(userPermission, group.requiredPermission)) continue
+            }
 
             summary.push({
                 index: group.index,
@@ -188,6 +207,7 @@ export class ToolGroupManager {
                 toolCount: group.tools.length,
                 source: group.source || 'builtin',
                 serverName: group.serverName,
+                requiredPermission: group.requiredPermission || null,
                 enabled: group.enabled
             })
         }
@@ -211,8 +231,8 @@ export class ToolGroupManager {
     /**
      * @returns {string} 调度提示词
      */
-    buildDispatchPrompt() {
-        const summary = this.getGroupSummary()
+    buildDispatchPrompt(options = {}) {
+        const summary = this.getGroupSummary(options)
 
         let prompt = `你是智能任务调度器。分析用户请求，拆分为一个或多个任务。
 
@@ -346,20 +366,21 @@ export class ToolGroupManager {
      * @param {string} [originalMessage] - 原始用户消息（用于智能回退）
      * @returns {{analysis: string, tasks: Array, executionMode: string, toolGroups: number[]}}
      */
-    parseDispatchResponseV2(response, originalMessage = '') {
+    parseDispatchResponseV2(response, originalMessage = '', options = {}) {
         // 智能默认：如果检测到工具意图，默认使用全量工具而非chat
         const hasToolIntent = this.detectToolIntent(originalMessage)
+        const defaultToolGroups = hasToolIntent ? this.getAllGroupIndexes(options) : []
         const defaultResult = {
             analysis: '',
             tasks: [
                 {
                     type: hasToolIntent ? 'tool' : 'chat',
                     priority: 1,
-                    params: hasToolIntent ? { toolGroups: this.getAllGroupIndexes() } : {}
+                    params: hasToolIntent ? { toolGroups: defaultToolGroups } : {}
                 }
             ],
             executionMode: 'sequential',
-            toolGroups: hasToolIntent ? this.getAllGroupIndexes() : []
+            toolGroups: defaultToolGroups
         }
 
         if (!response || typeof response !== 'string') {
@@ -398,9 +419,7 @@ export class ToolGroupManager {
                         // 验证并修正工具组索引
                         let params = t.params || {}
                         if (type === 'tool' && Array.isArray(params.toolGroups)) {
-                            params.toolGroups = params.toolGroups.filter(
-                                i => typeof i === 'number' && this.groups.has(i)
-                            )
+                            params.toolGroups = params.toolGroups.filter(i => this.canUseGroupIndex(i, options))
                             // 如果工具组为空，降级为chat
                             if (params.toolGroups.length === 0) {
                                 return {
@@ -453,7 +472,7 @@ export class ToolGroupManager {
         }
 
         // 兼容旧格式：纯数组
-        const indexes = this.parseDispatchResponse(response)
+        const indexes = this.parseDispatchResponse(response, options)
         if (indexes.length > 0) {
             logger.debug(`[ToolGroupManager] 使用旧格式解析，工具组=[${indexes.join(',')}]`)
             return {
@@ -482,11 +501,9 @@ export class ToolGroupManager {
             const group = this.groups.get(index)
             if (group && group.enabled) {
                 // 权限检查：如果工具组需要特定权限，验证用户权限
-                if (group.requiredPermission && options.userPermission) {
-                    const permLevels = { member: 0, admin: 1, owner: 2, master: 3 }
-                    const userLevel = permLevels[options.userPermission] || 0
-                    const requiredLevel = permLevels[group.requiredPermission] || 0
-                    if (userLevel < requiredLevel) {
+                if (group.requiredPermission) {
+                    const userPermission = resolveToolPermission(options)
+                    if (!hasToolPermission(userPermission, group.requiredPermission)) {
                         logger.debug(
                             `[ToolGroupManager] 权限不足跳过工具组 [${index}] ${group.name}，需要 ${group.requiredPermission}`
                         )
@@ -505,13 +522,13 @@ export class ToolGroupManager {
         let allTools
         try {
             if (this._skillsLoader) {
-                allTools = this._skillsLoader.getTools()
+                allTools = this._skillsLoader.getTools({ includeDuplicateNames: true })
             }
             if (!allTools || allTools.length === 0) {
                 const { skillsLoader } = await import('../skills/SkillsLoader.js')
                 if (skillsLoader.initialized) {
                     this._skillsLoader = skillsLoader
-                    allTools = skillsLoader.getTools()
+                    allTools = skillsLoader.getTools({ includeDuplicateNames: true })
                 }
             }
         } catch {
@@ -520,14 +537,16 @@ export class ToolGroupManager {
 
         // 回退：直接从 mcpManager 获取
         if (!allTools || allTools.length === 0) {
-            allTools = mcpManager.getTools(options)
+            allTools = mcpManager.getTools({ applyConfig: false, includeDuplicateNames: true })
         }
 
-        const selectedTools = allTools.filter(t => toolNames.has(t.name))
+        const selectedTools = allTools.filter(t => toolNames.has(t.name) || toolNames.has(getToolIdentity(t)))
+        await toolFilterService.init()
+        const filteredTools = toolFilterService.filterTools(selectedTools, options.presetId || 'default', options)
 
-        logger.debug(`[ToolGroupManager] 选中工具组 [${indexes.join(',')}]，返回 ${selectedTools.length} 个工具`)
+        logger.debug(`[ToolGroupManager] 选中工具组 [${indexes.join(',')}]，返回 ${filteredTools.length} 个工具`)
 
-        return selectedTools
+        return filteredTools
     }
 
     /**
@@ -561,9 +580,24 @@ export class ToolGroupManager {
             .filter(([_, g]) => {
                 if (!g.enabled) return false
                 if (!includeMcp && g.source === 'mcp') return false
+                if (g.requiredPermission && this.hasPermissionContext(options)) {
+                    const userPermission = resolveToolPermission(options)
+                    if (!hasToolPermission(userPermission, g.requiredPermission)) return false
+                }
                 return true
             })
             .map(([idx, _]) => idx)
+    }
+
+    canUseGroupIndex(index, options = {}) {
+        if (typeof index !== 'number') return false
+        const group = this.groups.get(index)
+        if (!group || !group.enabled) return false
+        if (group.requiredPermission && this.hasPermissionContext(options)) {
+            const userPermission = resolveToolPermission(options)
+            return hasToolPermission(userPermission, group.requiredPermission)
+        }
+        return true
     }
 
     /**
@@ -655,7 +689,7 @@ export class ToolGroupManager {
      * @param {string} response - 调度模型的响应
      * @returns {number[]} 工具组索引数组
      */
-    parseDispatchResponse(response) {
+    parseDispatchResponse(response, options = {}) {
         if (!response || typeof response !== 'string') {
             return []
         }
@@ -667,7 +701,7 @@ export class ToolGroupManager {
             if (match) {
                 const indexes = JSON.parse(match[0])
                 if (Array.isArray(indexes)) {
-                    return indexes.filter(i => typeof i === 'number' && this.groups.has(i))
+                    return indexes.filter(i => this.canUseGroupIndex(i, options))
                 }
             }
         } catch {
@@ -677,7 +711,7 @@ export class ToolGroupManager {
         // 尝试提取数字
         const numbers = response.match(/\d+/g)
         if (numbers) {
-            return numbers.map(n => parseInt(n, 10)).filter(i => !isNaN(i) && this.groups.has(i))
+            return numbers.map(n => parseInt(n, 10)).filter(i => this.canUseGroupIndex(i, options))
         }
 
         return []

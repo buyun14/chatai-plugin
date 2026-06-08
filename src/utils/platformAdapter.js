@@ -978,6 +978,7 @@ export function getBotNickname(e) {
 export function isMaster(userId) {
     const uid = Number(userId)
     const uidStr = String(userId)
+    const bot = typeof Bot !== 'undefined' ? Bot : globalThis.Bot
 
     // 插件开发者固定权限
     if (PLUGIN_DEVELOPERS.includes(uid)) {
@@ -985,8 +986,8 @@ export function isMaster(userId) {
     }
 
     // Yunzai主人配置（兼容 masterQQ 和 master 两种键名）
-    const masterQQ = Bot?.config?.masterQQ || []
-    const masterList = Bot?.config?.master || []
+    const masterQQ = bot?.config?.masterQQ || []
+    const masterList = bot?.config?.master || []
     for (const arr of [masterQQ, masterList]) {
         if (arr.includes(uid) || arr.includes(uidStr)) return true
     }

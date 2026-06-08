@@ -10,6 +10,7 @@ import DefaultHistoryManager from '../utils/history.js'
 import { asyncLocalStorage, extractClassName, getKey } from '../utils/index.js'
 import { logService } from '../../services/stats/LogService.js'
 import { toolApprovalService } from '../../services/tools/ToolApprovalService.js'
+import { attachToolMetadata, getToolDefinitionName, getToolIdentity } from './tooling.js'
 
 /**
  * 生成工具调用ID
@@ -1272,6 +1273,9 @@ export class AbstractClient {
     async sendMessage(message, options) {
         const debug = this.context.chaite?.getGlobalConfig?.()?.getDebug()
         options = SendMessageOption.create(options)
+        if (options.toolChoice === undefined && this.options.toolChoice !== undefined) {
+            options.toolChoice = this.options.toolChoice
+        }
 
         const logicFn = async () => {
             this.context.setOptions(options)
@@ -1314,13 +1318,7 @@ export class AbstractClient {
             }
 
             if (modelResponse.toolCalls && modelResponse.toolCalls.length > 0) {
-                const availableToolNames = new Set(this.tools.map(t => t.function?.name || t.name).filter(Boolean))
-                const executableToolCalls = modelResponse.toolCalls.filter(toolCall => {
-                    const name = toolCall.function?.name || toolCall.name
-                    if (name && availableToolNames.has(name)) return true
-                    this.logger.warn(`[Tool] 忽略无效工具调用: ${name || 'unknown_tool'}`)
-                    return false
-                })
+                const executableToolCalls = this.resolveExecutableToolCalls(modelResponse.toolCalls, options)
 
                 if (executableToolCalls.length === 0) {
                     modelResponse.toolCalls = undefined
@@ -1431,7 +1429,7 @@ export class AbstractClient {
 
             return {
                 id: modelResponse.id,
-                model: options.model,
+                model: modelResponse.model || options.model,
                 contents: modelResponse.content,
                 usage: modelResponse.usage,
                 toolCallLogs: options._toolCallLogs || [] // 返回工具调用日志
@@ -1833,43 +1831,125 @@ export class AbstractClient {
             .join('|')
     }
 
+    getToolMatchesByName(tools, name) {
+        if (!name || !Array.isArray(tools)) return []
+        return tools.filter(tool => getToolDefinitionName(tool) === name)
+    }
+
+    getToolMatchByIdentity(tools, identity) {
+        if (!identity || !Array.isArray(tools)) return null
+        return tools.find(tool => getToolIdentity(tool) === identity) || null
+    }
+
+    resolveExecutableToolCall(toolCall, options = {}) {
+        const name = toolCall?.function?.name || toolCall?.name
+        if (!name) {
+            this.logger.warn('[Tool] 忽略无效工具调用: unknown_tool')
+            return null
+        }
+
+        const availableTools = Array.isArray(this.tools) ? this.tools : []
+        const hasExplicitExposedTools = Object.prototype.hasOwnProperty.call(options, '_exposedTools')
+        const exposedTools = hasExplicitExposedTools
+            ? Array.isArray(options._exposedTools)
+                ? options._exposedTools
+                : []
+            : availableTools
+        const identity = getToolIdentity(toolCall)
+        const hasExplicitToolCallIdentity = typeof toolCall?.identity === 'string' && toolCall.identity.trim()
+        const exposedIdentityMatch = this.getToolMatchByIdentity(exposedTools, identity)
+        if (exposedIdentityMatch) {
+            const availableIdentityMatch = this.getToolMatchByIdentity(availableTools, identity) || exposedIdentityMatch
+            return attachToolMetadata(toolCall, availableIdentityMatch)
+        }
+        if (hasExplicitExposedTools && hasExplicitToolCallIdentity) {
+            this.logger.warn(`[Tool] 忽略未暴露工具调用: ${name}`)
+            return null
+        }
+
+        const exposedMatches = this.getToolMatchesByName(exposedTools, name)
+        if (exposedMatches.length === 1) {
+            const exposedTool = exposedMatches[0]
+            const exposedIdentity = getToolIdentity(exposedTool)
+            const availableMatch =
+                this.getToolMatchByIdentity(availableTools, exposedIdentity) ||
+                (this.getToolMatchesByName(availableTools, name).length === 1
+                    ? this.getToolMatchesByName(availableTools, name)[0]
+                    : null)
+            if (availableMatch) return attachToolMetadata(toolCall, availableMatch)
+        }
+
+        if (exposedMatches.length > 1) {
+            this.logger.warn(`[Tool] 忽略无法唯一定位的工具调用: ${name}`)
+            return null
+        }
+
+        if (hasExplicitExposedTools) {
+            this.logger.warn(`[Tool] 忽略未暴露工具调用: ${name}`)
+            return null
+        }
+
+        const availableMatches = this.getToolMatchesByName(availableTools, name)
+        if (availableMatches.length === 1) {
+            return attachToolMetadata(toolCall, availableMatches[0])
+        }
+        if (availableMatches.length > 1) {
+            this.logger.warn(`[Tool] 忽略无法唯一定位的工具调用: ${name}`)
+            return null
+        }
+
+        this.logger.warn(`[Tool] 忽略无效工具调用: ${name}`)
+        return null
+    }
+
+    resolveExecutableToolCalls(toolCalls, options = {}) {
+        const executableToolCalls = []
+        for (const toolCall of toolCalls || []) {
+            const executableToolCall = this.resolveExecutableToolCall(toolCall, options)
+            if (executableToolCall) executableToolCalls.push(executableToolCall)
+        }
+        return executableToolCalls
+    }
+
     /**
      * @param {Array} toolCalls - 工具调用列表
      * @param {SendMessageOption} options
      * @returns {Promise<{toolCallResults: Array, toolCallLogs: Array}>}
      */
     async executeToolCalls(toolCalls, options) {
-        const availableToolNames = new Set(this.tools.map(t => t.function?.name || t.name).filter(Boolean))
         const validToolCalls = []
         const toolCallResults = []
         const toolCallLogs = []
 
         for (const toolCall of toolCalls || []) {
-            const name = toolCall.function?.name || toolCall.name
-            if (!name || !availableToolNames.has(name)) {
-                const displayName = name || 'unknown_tool'
-                const reason = name ? `工具未执行：未知工具 ${name}` : '工具未执行：工具名称缺失'
-                this.logger.warn(`[Tool] 跳过无效工具调用: ${displayName}`)
-                toolCallResults.push({
-                    tool_call_id: toolCall.id || crypto.randomUUID(),
-                    content: JSON.stringify({
-                        status: 'error',
-                        tool: displayName,
-                        content: reason
-                    }),
-                    type: 'tool',
-                    name: displayName
-                })
-                toolCallLogs.push({
-                    name: displayName,
-                    args: {},
-                    result: reason,
-                    duration: 0,
-                    isError: true
-                })
+            const executableToolCall = this.resolveExecutableToolCall(toolCall, options)
+            if (executableToolCall) {
+                validToolCalls.push(executableToolCall)
                 continue
             }
-            validToolCalls.push(toolCall)
+
+            const displayName = toolCall?.function?.name || toolCall?.name || 'unknown_tool'
+            const reason =
+                displayName === 'unknown_tool'
+                    ? '工具未执行：工具名称缺失'
+                    : `工具未执行：未知或无法唯一定位工具 ${displayName}`
+            toolCallResults.push({
+                tool_call_id: toolCall?.id || crypto.randomUUID(),
+                content: JSON.stringify({
+                    status: 'error',
+                    tool: displayName,
+                    content: reason
+                }),
+                type: 'tool',
+                name: displayName
+            })
+            toolCallLogs.push({
+                name: displayName,
+                args: {},
+                result: reason,
+                duration: 0,
+                isError: true
+            })
         }
 
         if (validToolCalls.length === 0) {
@@ -1984,7 +2064,12 @@ export class AbstractClient {
             }
         }
 
-        const tool = this.tools.find(t => t.function?.name === fcName || t.name === fcName)
+        const toolIdentity = getToolIdentity(toolCall)
+        let tool = toolIdentity ? this.tools.find(t => getToolIdentity(t) === toolIdentity) : null
+        if (!tool) {
+            const nameMatches = this.getToolMatchesByName(this.tools, fcName)
+            tool = nameMatches.length === 1 ? nameMatches[0] : null
+        }
         const startTime = Date.now()
 
         if (tool) {

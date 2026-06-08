@@ -9,6 +9,8 @@ const logger = chatLogger
 import { mcpManager } from '../../mcp/McpManager.js'
 import { toolFilterService } from '../tools/ToolFilterService.js'
 import { setBuiltinToolContext, getBuiltinToolContext, builtinMcpServer } from '../../mcp/BuiltinMcpServer.js'
+import { getToolIdentity } from '../../core/adapters/tooling.js'
+import { resolveToolPermission } from '../tools/ToolPermission.js'
 
 /**
  * @class SkillsAgent
@@ -39,7 +41,7 @@ export class SkillsAgent {
         this.userId = options.userId || options.event?.user_id
         this.groupId = options.groupId || options.event?.group_id
         this.presetId = options.presetId || 'default'
-        this.userPermission = options.userPermission || options.event?.sender?.role || 'member'
+        this.userPermission = resolveToolPermission(options)
 
         /** @type {string[]} 指定要加载的MCP服务器名称，为空则加载全部 */
         this.mcpServers = options.mcpServers || []
@@ -72,55 +74,64 @@ export class SkillsAgent {
     }
 
     _loadFromMcpManager() {
-        const allTools = mcpManager.getTools({ applyConfig: true })
+        const loadedTools = global.chatAiSkillsLoader?.initialized
+            ? global.chatAiSkillsLoader.getTools({ includeDuplicateNames: this.mcpServers.length > 0 })
+            : mcpManager.getTools({
+                  applyConfig: false,
+                  includeDuplicateNames: this.mcpServers.length > 0
+              })
+        const allTools = Array.isArray(loadedTools) ? loadedTools : []
         const filterOptions = {
             userPermission: this.userPermission,
+            event: this.event,
             groupId: this.groupId,
             userId: this.userId
         }
         const filteredTools = toolFilterService.filterTools(allTools, this.presetId, filterOptions)
 
         for (const tool of filteredTools) {
+            const source = this._getSource(tool)
             // 根据配置过滤工具来源
-            if (!this.includeBuiltinTools && (tool.isBuiltin || tool.serverName === 'builtin')) {
+            if (!this.includeBuiltinTools && source === 'builtin') {
                 continue
             }
-            if (
-                !this.includeMcpTools &&
-                tool.serverName &&
-                tool.serverName !== 'builtin' &&
-                tool.serverName !== 'custom-tools'
-            ) {
+            if (!this.includeMcpTools && source === 'mcp') {
                 continue
             }
             // 如果指定了特定MCP服务器，只加载这些服务器的工具
-            if (this.mcpServers.length > 0 && tool.serverName) {
-                if (
-                    !this.mcpServers.includes(tool.serverName) &&
-                    tool.serverName !== 'builtin' &&
-                    tool.serverName !== 'custom-tools'
-                ) {
+            if (this.mcpServers.length > 0 && source === 'mcp' && tool.serverName) {
+                if (!this.mcpServers.includes(tool.serverName)) {
                     continue
                 }
             }
 
             const category = tool.category || tool.serverName || 'general'
-            this.skills.set(tool.name, {
+            const identity = getToolIdentity(tool)
+            const key = identity || tool.name
+
+            this.skills.set(key, {
                 name: tool.name,
+                identity,
                 description: tool.description,
                 inputSchema: tool.inputSchema || { type: 'object', properties: {} },
                 category,
                 serverName: tool.serverName,
-                isBuiltin: tool.isBuiltin,
+                source,
+                isBuiltin: source === 'builtin',
                 isJsTool: tool.isJsTool,
-                isCustom: tool.isCustom,
-                isMcpTool: tool.serverName && tool.serverName !== 'builtin' && tool.serverName !== 'custom-tools'
+                isCustom: source === 'custom',
+                isMcpTool: source === 'mcp',
+                dangerous: tool.dangerous,
+                requireMaster: tool.requireMaster,
+                requiredPermission: tool.requiredPermission,
+                requirePermission: tool.requirePermission,
+                permissionRequired: tool.permissionRequired
             })
 
             if (!this.categories.has(category)) {
                 this.categories.set(category, { key: category, tools: [], serverName: tool.serverName })
             }
-            this.categories.get(category).tools.push(tool.name)
+            this.categories.get(category).tools.push(key)
         }
     }
 
@@ -129,9 +140,15 @@ export class SkillsAgent {
      */
     _loadMcpServerTools() {
         const servers = mcpManager.getServers()
+        const allowedServerNames = new Set(
+            Array.from(this.skills.values())
+                .filter(skill => skill.isMcpTool && skill.serverName)
+                .map(skill => skill.serverName)
+        )
         for (const server of servers) {
             if (server.status !== 'connected') continue
             if (server.name === 'builtin' || server.name === 'custom-tools') continue
+            if (!allowedServerNames.has(server.name)) continue
 
             // 如果指定了特定MCP服务器，只加载这些服务器
             if (this.mcpServers.length > 0 && !this.mcpServers.includes(server.name)) {
@@ -140,12 +157,15 @@ export class SkillsAgent {
 
             const serverInfo = mcpManager.getServer(server.name)
             if (serverInfo && serverInfo.tools) {
+                const visibleTools = serverInfo.tools.filter(
+                    t => this.getSkill(`mcp:${server.name}:${t.name}`) || this.getSkill(t.name)
+                )
                 this.mcpServerTools.set(server.name, {
                     name: server.name,
                     status: server.status,
                     type: server.type,
-                    tools: serverInfo.tools.map(t => t.name),
-                    toolCount: serverInfo.tools.length
+                    tools: visibleTools.map(t => `mcp:${server.name}:${t.name}`),
+                    toolCount: visibleTools.length
                 })
             }
         }
@@ -157,7 +177,13 @@ export class SkillsAgent {
     }
 
     static async executeTool(toolName, args, context, options = {}) {
-        const agent = new SkillsAgent({ event: options.event, presetId: options.presetId })
+        const agent = new SkillsAgent({
+            event: options.event,
+            presetId: options.presetId,
+            userPermission: options.userPermission,
+            groupId: options.groupId,
+            userId: options.userId
+        })
         await agent.init()
         return await agent.execute(toolName, args)
     }
@@ -175,7 +201,11 @@ export class SkillsAgent {
         return mcpManager.getTools().filter(t => t.isBuiltin)
     }
     static isDangerousTool(toolName) {
-        return toolFilterService.getDangerousTools().includes(toolName)
+        const dangerousTools = toolFilterService.getDangerousTools()
+        if (typeof toolName === 'object') {
+            return dangerousTools.includes(toolName.name) || dangerousTools.includes(toolName.identity)
+        }
+        return dangerousTools.includes(toolName)
     }
     static async checkToolAvailable(toolName, presetId = 'default', options = {}) {
         await toolFilterService.init()
@@ -295,20 +325,59 @@ export class SkillsAgent {
         return await mcpManager.disableAllTools()
     }
 
-    getSkillDefinitions() {
-        return Array.from(this.skills.values()).map(s => ({
+    getVisibleSkills(options = {}) {
+        const { includeDuplicateNames = false } = options
+        const skills = Array.from(this.skills.values())
+        if (includeDuplicateNames) return skills
+
+        const byName = new Map()
+        for (const skill of skills) {
+            if (!byName.has(skill.name)) byName.set(skill.name, skill)
+        }
+        return Array.from(byName.values())
+    }
+
+    getSkillDefinitions(options = {}) {
+        return this.getVisibleSkills(options).map(s => ({
             type: 'function',
+            name: s.name,
+            identity: s.identity,
+            serverName: s.serverName,
+            source: s.source,
+            isBuiltin: s.isBuiltin,
+            isJsTool: s.isJsTool,
+            isCustom: s.isCustom,
+            isMcpTool: s.isMcpTool,
+            dangerous: s.dangerous,
+            requireMaster: s.requireMaster,
+            requiredPermission: s.requiredPermission,
+            requirePermission: s.requirePermission,
+            permissionRequired: s.permissionRequired,
             function: { name: s.name, description: s.description, parameters: s.inputSchema }
         }))
     }
 
-    getExecutableSkills() {
-        return Array.from(this.skills.values()).map(s => ({
+    getExecutableSkills(options = {}) {
+        return this.getVisibleSkills(options).map(s => ({
+            name: s.name,
+            type: 'function',
+            identity: s.identity,
+            serverName: s.serverName,
+            source: s.source,
+            isBuiltin: s.isBuiltin,
+            isJsTool: s.isJsTool,
+            isCustom: s.isCustom,
+            isMcpTool: s.isMcpTool,
+            dangerous: s.dangerous,
+            requireMaster: s.requireMaster,
+            requiredPermission: s.requiredPermission,
+            requirePermission: s.requirePermission,
+            permissionRequired: s.permissionRequired,
             function: { name: s.name, description: s.description, parameters: s.inputSchema },
             run: async args => {
                 const startTime = Date.now()
                 try {
-                    const result = await this.execute(s.name, args)
+                    const result = await this.execute(s.identity || s.name, args)
                     const duration = Date.now() - startTime
 
                     // 提取实际内容
@@ -400,16 +469,17 @@ export class SkillsAgent {
     async execute(skillName, args = {}) {
         if (!this.initialized) await this.init()
 
-        const skill = this.skills.get(skillName)
+        const skill = this.getSkill(skillName)
         if (!skill) {
             return { content: [{ type: 'text', text: `技能 ${skillName} 不存在` }], isError: true }
         }
 
         // 权限检查
-        const accessCheck = toolFilterService.checkToolAccess(skillName, this.presetId, {
+        const accessCheck = toolFilterService.checkToolAccess(skill.name, this.presetId, {
             userPermission: this.userPermission,
             groupId: this.groupId,
-            userId: this.userId
+            userId: this.userId,
+            tool: skill
         })
         if (!accessCheck.allowed) {
             return { content: [{ type: 'text', text: accessCheck.reason }], isError: true }
@@ -439,9 +509,10 @@ export class SkillsAgent {
                 }
 
                 // 带超时包装
-                const callPromise = mcpManager.callTool(skillName, filled, {
+                const callPromise = mcpManager.callTool(skill.name, filled, {
                     useCache: cacheResults,
-                    cacheTTL: cacheTTL
+                    cacheTTL: cacheTTL,
+                    serverName: skill.serverName
                 })
                 const result = await this._withTimeout(callPromise, timeout, skillName)
 
@@ -504,11 +575,15 @@ export class SkillsAgent {
     // ========== 发现 (Discovery) ==========
 
     hasSkill(name) {
-        return this.skills.has(name)
+        return Boolean(this.getSkill(name))
     }
 
     getSkill(name) {
-        return this.skills.get(name) || null
+        if (this.skills.has(name)) return this.skills.get(name)
+        for (const skill of this.getVisibleSkills()) {
+            if (skill.name === name) return skill
+        }
+        return null
     }
 
     /**
@@ -517,7 +592,7 @@ export class SkillsAgent {
      * @returns {Object|null} 技能详情
      */
     getSkillDetail(name) {
-        const skill = this.skills.get(name)
+        const skill = this.getSkill(name)
         if (!skill) return null
 
         const params = skill.inputSchema?.properties || {}
@@ -537,7 +612,9 @@ export class SkillsAgent {
                 default: schema.default,
                 enum: schema.enum
             })),
-            isDangerous: toolFilterService.getDangerousTools().includes(name)
+            isDangerous:
+                toolFilterService.getDangerousTools().includes(skill.name) ||
+                toolFilterService.getDangerousTools().includes(skill.identity)
         }
     }
 
@@ -561,6 +638,7 @@ export class SkillsAgent {
             if (source) all = all.filter(s => this._matchSource(s, source))
             return all.slice(0, limit).map(s => ({
                 name: s.name,
+                identity: s.identity,
                 description: s.description,
                 category: s.category,
                 source: this._getSource(s)
@@ -568,32 +646,34 @@ export class SkillsAgent {
         }
 
         const scored = []
-        for (const [name, skill] of this.skills) {
+        for (const [key, skill] of this.skills) {
             if (category && skill.category !== category) continue
             if (source && !this._matchSource(skill, source)) continue
 
             let score = 0
-            const lName = name.toLowerCase()
+            const lName = skill.name.toLowerCase()
+            const lKey = key.toLowerCase()
             const lDesc = (skill.description || '').toLowerCase()
 
             // 精确名称匹配
-            if (lName === q) score += 100
+            if (lName === q || lKey === q) score += 100
             // 名称前缀匹配
-            else if (lName.startsWith(q)) score += 80
+            else if (lName.startsWith(q) || lKey.startsWith(q)) score += 80
             // 名称包含匹配
-            else if (lName.includes(q)) score += 60
+            else if (lName.includes(q) || lKey.includes(q)) score += 60
             // 描述包含匹配
             if (lDesc.includes(q)) score += 40
             // 拆分关键词匹配
             const words = q.split(/[\s_-]+/)
             for (const w of words) {
-                if (w && lName.includes(w)) score += 20
+                if (w && (lName.includes(w) || lKey.includes(w))) score += 20
                 if (w && lDesc.includes(w)) score += 10
             }
 
             if (score > 0) {
                 scored.push({
-                    name,
+                    name: skill.name,
+                    identity: skill.identity,
                     description: skill.description,
                     category: skill.category,
                     source: this._getSource(skill),
@@ -661,10 +741,11 @@ export class SkillsAgent {
             for (const toolName of catInfo.tools) {
                 if (seen.has(toolName)) continue
                 seen.add(toolName)
-                const skill = this.skills.get(toolName)
+                const skill = this.getSkill(toolName)
                 if (skill) {
                     recommended.push({
                         name: skill.name,
+                        identity: skill.identity,
                         description: skill.description,
                         category: skill.category,
                         source: this._getSource(skill)
@@ -689,29 +770,32 @@ export class SkillsAgent {
                 category: key,
                 count: cat.tools.length,
                 serverName: cat.serverName || null,
-                skills: cat.tools.slice(0, 5) // 每类展示前5个
+                skills: cat.tools.slice(0, 5).map(name => this.getSkill(name)?.name || name)
             })
         }
         return summary.sort((a, b) => b.count - a.count)
     }
 
     _matchSource(skill, source) {
-        if (source === 'builtin') return skill.isBuiltin
-        if (source === 'custom') return skill.isCustom || skill.isJsTool
-        if (source === 'mcp') return skill.isMcpTool
+        const skillSource = this._getSource(skill)
+        if (source === 'builtin') return skillSource === 'builtin'
+        if (source === 'custom') return skillSource === 'custom'
+        if (source === 'mcp') return skillSource === 'mcp'
         return true
     }
 
     _getSource(skill) {
-        if (skill.isBuiltin) return 'builtin'
-        if (skill.isCustom || skill.isJsTool) return 'custom'
+        if (skill.source === 'builtin' || skill.source === 'custom' || skill.source === 'mcp') return skill.source
         if (skill.isMcpTool) return 'mcp'
+        if (skill.isCustom || skill.isJsTool || skill.serverName === 'custom-tools') return 'custom'
+        if (skill.isBuiltin || skill.serverName === 'builtin') return 'builtin'
+        if (skill.serverName) return 'mcp'
         return 'unknown'
     }
 
     getSkillsByCategory(cat) {
         const c = this.categories.get(cat)
-        return c ? c.tools.map(n => this.skills.get(n)).filter(Boolean) : []
+        return c ? c.tools.map(n => this.getSkill(n)).filter(Boolean) : []
     }
     getCategories() {
         return Array.from(this.categories.keys())
@@ -741,7 +825,7 @@ export class SkillsAgent {
     getToolsByServer(serverName) {
         const serverInfo = this.mcpServerTools.get(serverName)
         if (!serverInfo) return []
-        return serverInfo.tools.map(name => this.skills.get(name)).filter(Boolean)
+        return serverInfo.tools.map(name => this.getSkill(name)).filter(Boolean)
     }
 
     /**
@@ -757,8 +841,10 @@ export class SkillsAgent {
                 toolCount: cat.tools.length,
                 tools: cat.tools
                     .map(name => {
-                        const skill = this.skills.get(name)
-                        return skill ? { name: skill.name, description: skill.description } : null
+                        const skill = this.getSkill(name)
+                        return skill
+                            ? { name: skill.name, identity: skill.identity, description: skill.description }
+                            : null
                     })
                     .filter(Boolean)
             })
@@ -892,64 +978,92 @@ export async function disableAllTools() {
     return await SkillsAgent.disableAllTools()
 }
 
+function getToolSource(tool) {
+    if (tool.source === 'builtin' || tool.source === 'custom' || tool.source === 'mcp') return tool.source
+    if (tool.isMcpTool) return 'mcp'
+    if (tool.isCustom || tool.isJsTool || tool.serverName === 'custom-tools') return 'custom'
+    if (tool.isBuiltin || tool.serverName === 'builtin') return 'builtin'
+    if (tool.serverName) return 'mcp'
+    return 'unknown'
+}
+
 export function convertMcpTools(mcpTools, requestContext = null) {
-    return mcpTools.map(t => ({
-        function: {
+    return mcpTools.map(t => {
+        const source = getToolSource(t)
+        const identity = getToolIdentity({
             name: t.name,
-            description: t.description,
-            parameters: t.inputSchema || { type: 'object', properties: {} }
-        },
-        async run(args) {
-            const startTime = Date.now()
-            try {
-                const result = await mcpManager.callTool(t.name, args, {
-                    useCache: true,
-                    cacheTTL: 60000,
-                    context: requestContext
-                })
-                const duration = Date.now() - startTime
+            serverName: t.serverName,
+            source,
+            isMcpTool: source === 'mcp'
+        })
+        return {
+            name: t.name,
+            type: 'function',
+            identity,
+            serverName: t.serverName,
+            source,
+            isBuiltin: source === 'builtin',
+            isJsTool: t.isJsTool,
+            isCustom: source === 'custom',
+            isMcpTool: source === 'mcp',
+            function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.inputSchema || { type: 'object', properties: {} }
+            },
+            async run(args) {
+                const startTime = Date.now()
+                try {
+                    const result = await mcpManager.callTool(t.name, args, {
+                        useCache: true,
+                        cacheTTL: 60000,
+                        context: requestContext,
+                        serverName: t.serverName
+                    })
+                    const duration = Date.now() - startTime
 
-                // 提取实际内容
-                let content
-                const isError = result?.isError === true
+                    // 提取实际内容
+                    let content
+                    const isError = result?.isError === true
 
-                if (result && typeof result === 'object') {
-                    // MCP 格式：{ content: [{type: 'text', text: '...'}] }
-                    if (Array.isArray(result.content)) {
-                        content = result.content
-                            .map(item => (item.type === 'text' ? item.text : JSON.stringify(item)))
-                            .join('\n')
+                    if (result && typeof result === 'object') {
+                        // MCP 格式：{ content: [{type: 'text', text: '...'}] }
+                        if (Array.isArray(result.content)) {
+                            content = result.content
+                                .map(item => (item.type === 'text' ? item.text : JSON.stringify(item)))
+                                .join('\n')
+                        }
+                        // 已格式化的对象
+                        else if (result.status) {
+                            content = result.content
+                        }
+                        // 其他对象
+                        else {
+                            content = typeof result.content === 'string' ? result.content : JSON.stringify(result)
+                        }
+                    } else {
+                        content = typeof result === 'string' ? result : JSON.stringify(result)
                     }
-                    // 已格式化的对象
-                    else if (result.status) {
-                        content = result.content
+
+                    // 包装为标准格式
+                    const formattedResult = {
+                        status: isError ? 'error' : 'success',
+                        tool: t.name,
+                        content: content,
+                        metadata: { duration }
                     }
-                    // 其他对象
-                    else {
-                        content = typeof result.content === 'string' ? result.content : JSON.stringify(result)
-                    }
-                } else {
-                    content = typeof result === 'string' ? result : JSON.stringify(result)
+                    return JSON.stringify(formattedResult)
+                } catch (error) {
+                    return JSON.stringify({
+                        status: 'error',
+                        tool: t.name,
+                        content: error.message,
+                        metadata: { duration: Date.now() - startTime }
+                    })
                 }
-
-                // 包装为标准格式
-                const formattedResult = {
-                    status: isError ? 'error' : 'success',
-                    tool: t.name,
-                    content: content,
-                    metadata: { duration }
-                }
-                return JSON.stringify(formattedResult)
-            } catch (error) {
-                return JSON.stringify({
-                    status: 'error',
-                    tool: t.name,
-                    content: error.message,
-                    metadata: { duration: Date.now() - startTime }
-                })
             }
         }
-    }))
+    })
 }
 
 export async function createSkillsAgent(options = {}) {

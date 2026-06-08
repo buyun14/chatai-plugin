@@ -4,6 +4,8 @@
  * 支持热重载：使用动态导入 + 时间戳避免缓存
  */
 
+import { chatLogger as logger } from '../../core/utils/logger.js'
+
 // 工具模块文件列表
 const toolModules = {
     basic: { file: './basic.js', export: 'basicTools' },

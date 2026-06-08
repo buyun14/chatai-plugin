@@ -1,5 +1,6 @@
 import Redis from 'ioredis'
 import config from '../../../config/config.js'
+import { chatLogger as logger } from '../utils/logger.js'
 
 class RedisClient {
     constructor() {

@@ -5,9 +5,11 @@ import axios from 'axios'
 import crypto from 'crypto'
 import { ensureScopeManager } from '../src/services/scope/ScopeManager.js'
 import { getBfaceUrl } from '../src/utils/messageParser.js'
+import { chatLogger as logger } from '../src/core/utils/logger.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const PluginBase = typeof plugin !== 'undefined' ? plugin : class {}
 
 /**
  * 表情包小偷服务
@@ -534,7 +536,7 @@ export const emojiThiefService = new EmojiThiefService()
 /**
  * 表情包小偷插件
  */
-export class EmojiThief extends plugin {
+export class EmojiThief extends PluginBase {
     constructor() {
         super({
             name: 'AI-表情包小偷',

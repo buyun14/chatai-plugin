@@ -6,6 +6,8 @@
 
 export { skillsConfig, default as SkillsConfig } from './SkillsConfig.js'
 export { skillsLoader, default as SkillsLoader } from './SkillsLoader.js'
+export { skillDocumentLoader, default as SkillDocumentLoader } from './SkillDocumentLoader.js'
+export { applySkillToolConstraints, getSkillToolConstraints } from './SkillToolConstraints.js'
 
 /**
  * 初始化 Skills 模块
@@ -14,12 +16,14 @@ export { skillsLoader, default as SkillsLoader } from './SkillsLoader.js'
 export async function initSkillsModule(pluginRoot) {
     const { skillsConfig } = await import('./SkillsConfig.js')
     const { skillsLoader } = await import('./SkillsLoader.js')
+    const { skillDocumentLoader } = await import('./SkillDocumentLoader.js')
 
     await skillsConfig.init(pluginRoot)
     await skillsLoader.init(pluginRoot)
 
     return {
         config: skillsConfig,
-        loader: skillsLoader
+        loader: skillsLoader,
+        documents: skillDocumentLoader
     }
 }

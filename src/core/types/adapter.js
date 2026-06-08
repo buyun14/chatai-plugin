@@ -16,10 +16,15 @@
  * @property {boolean} [stream]
  * @property {boolean} [isThinkingModel]
  * @property {boolean} [enableReasoning]
- * @property {'high' | 'medium' | 'low' | 'minimal'} [reasoningEffort]
+ * @property {'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'auto'} [reasoningEffort]
  * @property {'auto' | 'off' | 'glm'} [thinkingVendorControl] - BigModel/智谱等需在 body 中传 thinking.type 时的策略
  * @property {number} [reasoningBudgetTokens]
  * @property {ToolChoice} [toolChoice]
+ * @property {any} [tool_choice]
+ * @property {any} [responsesToolChoice]
+ * @property {any} [responseToolChoice]
+ * @property {Object} [openaiResponses]
+ * @property {'ask' | 'auto' | 'confirm_all' | 'yolo'} [toolApprovalMode]
  * @property {string[]} [postProcessorIds]
  * @property {string[]} [preProcessorIds]
  * @property {string[]} [toolGroupId]
@@ -35,8 +40,10 @@
 
 /**
  * @typedef {Object} ToolChoice
- * @property {'none' | 'any' | 'auto' | 'specified'} type
- * @property {string[]} [tools]
+ * @property {'none' | 'any' | 'auto' | 'specified' | 'allowed' | 'allowed_tools' | 'required' | 'function' | 'custom' | 'mcp' | 'tool'} type
+ * @property {(string | Object)[]} [tools]
+ * @property {{mode?: 'auto' | 'required', tools?: (string | Object)[]}} [allowed_tools]
+ * @property {'auto' | 'required'} [mode]
  */
 
 /**

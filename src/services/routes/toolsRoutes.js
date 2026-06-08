@@ -9,6 +9,7 @@ import config from '../../../config/config.js'
 import { ChaiteResponse } from './shared.js'
 import { mcpManager } from '../../mcp/McpManager.js'
 import { builtinMcpServer } from '../../mcp/BuiltinMcpServer.js'
+import { getToolIdentity } from '../../core/adapters/tooling.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -21,9 +22,11 @@ router.get('/list', async (req, res) => {
     try {
         await mcpManager.init()
         // 不应用配置过滤，返回全部工具（前端需要显示禁用状态）
-        const tools = mcpManager.getTools({ applyConfig: false })
-        const customTools = config.get('customTools') || []
-        res.json(ChaiteResponse.ok([...tools, ...customTools]))
+        const tools = mcpManager.getTools({ applyConfig: false, includeDuplicateNames: true }).map(tool => ({
+            ...tool,
+            identity: getToolIdentity(tool)
+        }))
+        res.json(ChaiteResponse.ok(tools))
     } catch (error) {
         res.json(ChaiteResponse.ok([]))
     }
@@ -478,8 +481,15 @@ router.post('/test', async (req, res) => {
         }
 
         await mcpManager.init()
+        let callName = toolName
+        const callOptions = {}
+        const identityMatch = typeof toolName === 'string' ? toolName.match(/^mcp:([^:]+):(.+)$/) : null
+        if (identityMatch) {
+            callOptions.serverName = identityMatch[1]
+            callName = identityMatch[2]
+        }
         const startTime = Date.now()
-        const result = await mcpManager.callTool(toolName, args || {})
+        const result = await mcpManager.callTool(callName, args || {}, callOptions)
         const duration = Date.now() - startTime
 
         res.json(
@@ -591,9 +601,10 @@ router.get('/dangerous', async (req, res) => {
         const allTools = mcpManager.getTools({ applyConfig: false })
         const toolsWithDangerStatus = allTools.map(t => ({
             name: t.name,
+            identity: getToolIdentity(t),
             description: t.description,
             serverName: t.serverName,
-            isDangerous: dangerousTools.includes(t.name)
+            isDangerous: dangerousTools.includes(t.name) || dangerousTools.includes(getToolIdentity(t))
         }))
 
         res.json(

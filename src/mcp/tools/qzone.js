@@ -5,6 +5,7 @@
  */
 
 import { callOneBotApi, icqqFriend, icqqGroup } from './helpers.js'
+import { chatLogger as logger } from '../../core/utils/logger.js'
 
 /**
  * 从 p_skey 计算 g_tk（QQ空间鉴权令牌）

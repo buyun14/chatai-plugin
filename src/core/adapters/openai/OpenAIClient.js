@@ -1,7 +1,6 @@
 import { chatLogger } from '../../utils/logger.js'
 const logger = chatLogger
 import OpenAI from 'openai'
-import WebSocket from 'ws'
 import crypto from 'node:crypto'
 import {
     AbstractClient,
@@ -15,6 +14,121 @@ import { proxyService } from '../../../services/proxy/ProxyService.js'
 import { logService } from '../../../services/stats/LogService.js'
 import { requestTemplateService } from '../../../services/proxy/RequestTemplateService.js'
 import { statsService } from '../../../services/stats/StatsService.js'
+import { attachToolMetadata, mergeToolDefinitions, resolveToolChoice } from '../tooling.js'
+
+let ResponsesWSClassPromise = null
+const RESPONSES_EXTRA_PARAM_KEYS = [
+    'background',
+    'context_management',
+    'conversation',
+    'include',
+    'instructions',
+    'max_output_tokens',
+    'max_tool_calls',
+    'metadata',
+    'moderation',
+    'parallel_tool_calls',
+    'previous_response_id',
+    'prompt',
+    'prompt_cache_key',
+    'prompt_cache_retention',
+    'reasoning',
+    'safety_identifier',
+    'service_tier',
+    'store',
+    'stream_options',
+    'temperature',
+    'text',
+    'top_logprobs',
+    'top_p',
+    'truncation',
+    'user'
+]
+const OPENAI_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+const RESPONSES_EXECUTABLE_ITEM_TYPES = new Set(['function_call', 'custom_tool_call', 'local_shell_call', 'shell_call'])
+
+function mergeResponseTools(functionTools = [], openaiResponses = {}) {
+    const extraTools = Array.isArray(openaiResponses.tools) ? openaiResponses.tools : []
+    return mergeToolDefinitions(functionTools, extraTools)
+}
+
+function resolveOpenAIResponsesOptions(options = {}, clientOptions = {}) {
+    return {
+        ...(clientOptions.openaiResponses || {}),
+        ...(options.openaiResponses || {}),
+        ...(options.responsesOptions || {})
+    }
+}
+
+function normalizeOpenAIUsage(usage = {}) {
+    const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {}
+    const completionDetails = usage.completion_tokens_details || usage.output_tokens_details || {}
+    const promptTokens = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens
+    const completionTokens = usage.completion_tokens ?? usage.output_tokens ?? usage.completionTokens
+    const totalTokens =
+        usage.total_tokens ?? usage.totalTokens ?? ((promptTokens || 0) + (completionTokens || 0) || undefined)
+    const cacheReadTokens =
+        promptDetails.cached_tokens ||
+        usage.cache_read_input_tokens ||
+        usage.cacheReadTokens ||
+        usage.cachedTokens ||
+        usage.cached_tokens ||
+        0
+    const cacheWriteTokens =
+        promptDetails.cache_creation_tokens ||
+        usage.cache_creation_input_tokens ||
+        usage.cacheWriteTokens ||
+        usage.cacheCreationTokens ||
+        usage.cache_creation_tokens ||
+        0
+    const reasoningTokens = completionDetails.reasoning_tokens || usage.reasoning_tokens || usage.reasoningTokens || 0
+    return {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: totalTokens,
+        input_tokens: promptTokens,
+        output_tokens: completionTokens,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        cachedTokens: cacheReadTokens,
+        cached_tokens: cacheReadTokens,
+        cache_read_input_tokens: cacheReadTokens,
+        cacheReadTokens,
+        cache_creation_input_tokens: cacheWriteTokens,
+        cacheWriteTokens,
+        cacheCreationTokens: cacheWriteTokens,
+        cacheReadCount: usage.cacheReadCount || (cacheReadTokens > 0 ? 1 : 0),
+        cacheWriteCount: usage.cacheWriteCount || (cacheWriteTokens > 0 ? 1 : 0),
+        reasoningTokens
+    }
+}
+
+function attachUsageModel(usage = {}, model) {
+    const normalized = normalizeOpenAIUsage(usage || {})
+    const responseModel = model || usage.responseModel || usage.model
+    if (responseModel) {
+        normalized.model = responseModel
+        normalized.responseModel = responseModel
+    }
+    return normalized
+}
+
+function resolveOpenAIWsOptions(options = {}, clientOptions = {}) {
+    return {
+        ...(clientOptions.openaiWs || {}),
+        ...(clientOptions.experimental?.ws || {}),
+        ...(options.openaiWs || {}),
+        ...(options.experimental?.ws || {})
+    }
+}
+
+async function loadResponsesWSClass() {
+    if (!ResponsesWSClassPromise) {
+        ResponsesWSClassPromise = import('openai/resources/responses/ws').then(mod => mod.ResponsesWS)
+    }
+    return await ResponsesWSClassPromise
+}
 
 /**
  * @typedef {import('../../types').BaseClientOptions} BaseClientOptions
@@ -152,6 +266,10 @@ function sanitizeToolEnums(obj) {
     return result
 }
 
+function sanitizeToolWithMetadata(tool) {
+    return attachToolMetadata(sanitizeToolEnums(tool), tool)
+}
+
 /**
  * 合并单次请求与客户端上的推理相关选项（单次请求优先）
  * @param {object} options
@@ -159,7 +277,11 @@ function sanitizeToolEnums(obj) {
  */
 function mergeOpenAIReasoningOptions(options, clientOpts) {
     const enableReasoning = options.enableReasoning ?? clientOpts?.enableReasoning ?? false
-    const reasoningEffort = options.reasoningEffort ?? clientOpts?.reasoningEffort ?? 'low'
+    const requestedReasoningEffort = options.reasoningEffort ?? clientOpts?.reasoningEffort ?? 'low'
+    const reasoningEffort =
+        requestedReasoningEffort !== 'auto' && OPENAI_REASONING_EFFORTS.has(requestedReasoningEffort)
+            ? requestedReasoningEffort
+            : undefined
     const thinkingVendorControl = options.thinkingVendorControl ?? clientOpts?.thinkingVendorControl ?? 'auto'
     const isThinkingModelFlag = options.isThinkingModel
     return { enableReasoning, reasoningEffort, thinkingVendorControl, isThinkingModelFlag }
@@ -230,8 +352,12 @@ export class OpenAIClient extends AbstractClient {
     }
 
     shouldUseExperimentalOpenAIWs(options = {}) {
-        const wsConfig = this.options?.experimental?.ws || this.options?.openaiWs || {}
+        const wsConfig = resolveOpenAIWsOptions(options, this.options)
         return this.shouldUseOpenAIResponses(options) && (options.experimentalWs === true || wsConfig.enabled === true)
+    }
+
+    async resolveResponsesWSClass(wsConfig = {}) {
+        return wsConfig.ResponsesWSClass || (await loadResponsesWSClass())
     }
 
     buildOpenAIClientOptions(apiKey, mergedHeaders, channelProxy, responsePath) {
@@ -287,6 +413,10 @@ export class OpenAIClient extends AbstractClient {
         }
 
         return clientOptions
+    }
+
+    buildResponsesWSClientOptions(apiKey, mergedHeaders, channelProxy) {
+        return this.buildOpenAIClientOptions(apiKey, mergedHeaders, channelProxy, this.getOpenAIResponsePath())
     }
 
     openAIMessageContentToResponseInputContent(content) {
@@ -359,11 +489,38 @@ export class OpenAIClient extends AbstractClient {
                     parameters: tool.function.parameters || { type: 'object', properties: {} }
                 }
             }
+            if (tool?.type === 'custom' && tool.custom?.name) {
+                return {
+                    type: 'custom',
+                    name: tool.custom.name,
+                    description: tool.custom.description,
+                    format: tool.custom.format
+                }
+            }
             return tool
         })
     }
 
+    copyResponsesExtraParams(payload, requestPayload, options = {}, openaiResponses = {}) {
+        for (const key of RESPONSES_EXTRA_PARAM_KEYS) {
+            const directValue = requestPayload[key] ?? options[key]
+            if (directValue !== undefined && directValue !== null) {
+                payload[key] = directValue
+                continue
+            }
+            const configuredValue = openaiResponses[key]
+            if (
+                (payload[key] === undefined || payload[key] === null) &&
+                configuredValue !== undefined &&
+                configuredValue !== null
+            ) {
+                payload[key] = configuredValue
+            }
+        }
+    }
+
     buildResponsesPayload(requestPayload, options = {}) {
+        const openaiResponses = resolveOpenAIResponsesOptions(options, this.options)
         const payload = {
             model: requestPayload.model,
             input: this.openAIMessagesToResponsesInput(requestPayload.messages || []),
@@ -371,10 +528,16 @@ export class OpenAIClient extends AbstractClient {
             stream: requestPayload.stream,
             tools: requestPayload.tools?.length ? this.openAIToolsToResponsesTools(requestPayload.tools) : undefined,
             tool_choice: requestPayload.tool_choice,
-            reasoning: requestPayload.reasoning_effort ? { effort: requestPayload.reasoning_effort } : undefined,
+            reasoning:
+                requestPayload.reasoning ||
+                (requestPayload.reasoning_effort ? { effort: requestPayload.reasoning_effort } : undefined),
             previous_response_id: options.previous_response_id || options.previousResponseId,
             store: options.storeResponse === true || options.store === true ? true : undefined
         }
+        if (openaiResponses.tool_choice !== undefined && payload.tool_choice === undefined) {
+            payload.tool_choice = openaiResponses.tool_choice
+        }
+        this.copyResponsesExtraParams(payload, requestPayload, options, openaiResponses)
 
         if (requestPayload.max_completion_tokens || requestPayload.max_tokens) {
             payload.max_output_tokens = requestPayload.max_completion_tokens || requestPayload.max_tokens
@@ -386,15 +549,414 @@ export class OpenAIClient extends AbstractClient {
     }
 
     normalizeResponsesToolCall(item) {
-        const args = item.arguments ?? item.action?.arguments ?? item.input ?? '{}'
+        if (item.type === 'local_shell_call') {
+            const action = item.action || {}
+            const command = Array.isArray(action.command) ? action.command.join(' ') : action.command || ''
+            return {
+                id: item.call_id || item.id || crypto.randomUUID(),
+                type: 'function',
+                function: {
+                    name: 'execute_command',
+                    arguments: JSON.stringify({
+                        command,
+                        cwd: action.working_directory || undefined,
+                        timeout: action.timeout_ms || undefined
+                    })
+                }
+            }
+        }
+        if (item.type === 'shell_call') {
+            const action = item.action || {}
+            const commands = Array.isArray(action.commands) ? action.commands : []
+            return {
+                id: item.call_id || item.id || crypto.randomUUID(),
+                type: 'function',
+                function: {
+                    name: 'execute_command',
+                    arguments: JSON.stringify({
+                        command: commands.join('\n'),
+                        timeout: action.timeout_ms || undefined
+                    })
+                }
+            }
+        }
+        const args = item.arguments ?? item.action?.arguments ?? item.input ?? item.custom?.input ?? '{}'
+        const normalizedArgs =
+            item.type === 'custom_tool_call' && typeof args === 'string'
+                ? JSON.stringify({ input: args })
+                : typeof args === 'string'
+                  ? args
+                  : JSON.stringify(args || {})
         return {
             id: item.call_id || item.id || crypto.randomUUID(),
             type: 'function',
             function: {
-                name: item.name || item.action?.name || item.function?.name || '',
-                arguments: typeof args === 'string' ? args : JSON.stringify(args || {})
+                name: item.name || item.action?.name || item.function?.name || item.custom?.name || '',
+                arguments: normalizedArgs
             }
         }
+    }
+
+    upsertChatToolCall(toolCallsMap, deltaToolCall) {
+        const idx = deltaToolCall.index ?? toolCallsMap.size
+        if (!toolCallsMap.has(idx)) {
+            toolCallsMap.set(idx, {
+                id: deltaToolCall.id || '',
+                type: 'function',
+                function: { name: '', arguments: '' }
+            })
+        }
+
+        const existing = toolCallsMap.get(idx)
+        if (deltaToolCall.id) existing.id = deltaToolCall.id
+        if (deltaToolCall.function?.name) existing.function.name += deltaToolCall.function.name
+        if (deltaToolCall.function?.arguments) existing.function.arguments += deltaToolCall.function.arguments
+        if (deltaToolCall.custom?.name) existing.function.name += deltaToolCall.custom.name
+        if (deltaToolCall.custom?.input) existing.function.arguments += deltaToolCall.custom.input
+        return existing
+    }
+
+    normalizeExecutableToolCalls(toolCalls = []) {
+        return toolCalls.map(toolCall => {
+            const args = toolCall.function?.arguments
+            if (typeof args !== 'string' || !args) return toolCall
+            try {
+                JSON.parse(args)
+                return toolCall
+            } catch {
+                return {
+                    ...toolCall,
+                    function: {
+                        ...toolCall.function,
+                        arguments: JSON.stringify({ input: args })
+                    }
+                }
+            }
+        })
+    }
+
+    responsesOutputItemToText(item) {
+        if (!item || typeof item !== 'object') return ''
+        if (item.type === 'additional_tools') {
+            const role = item.role || 'unknown'
+            const toolCount = Array.isArray(item.tools) ? item.tools.length : 0
+            return `[additional_tools ${role}: ${toolCount} tools]`
+        }
+        if (item.type === 'image_generation_call') {
+            return item.result ? '[image_generation_call completed]' : ''
+        }
+        if (item.type === 'code_interpreter_call') {
+            const outputs = Array.isArray(item.outputs) ? item.outputs : []
+            const outputText = outputs
+                .map(output => {
+                    if (output.type === 'logs') return output.logs || ''
+                    if (output.type === 'image') return output.url ? `[code_interpreter_image] ${output.url}` : ''
+                    return ''
+                })
+                .filter(Boolean)
+                .join('\n')
+            if (outputText) return outputText
+            if (item.code) return `[code_interpreter_call ${item.status || 'completed'}]\n${item.code}`
+            return item.status ? `[code_interpreter_call ${item.status}]` : ''
+        }
+        if (item.type === 'tool_search_call') {
+            return item.status ? `[tool_search_call ${item.status}]` : ''
+        }
+        if (item.type === 'tool_search_output') {
+            const toolCount = Array.isArray(item.tools) ? item.tools.length : 0
+            return `[tool_search_output ${item.status || 'completed'}: ${toolCount} tools]`
+        }
+        if (item.type === 'file_search_call') {
+            const status = item.status || 'completed'
+            const resultCount = Array.isArray(item.results) ? item.results.length : 0
+            return `[file_search_call ${status}: ${resultCount} results]`
+        }
+        if (item.type === 'web_search_call') {
+            const status = item.status || 'completed'
+            const action = item.action?.type ? ` ${item.action.type}` : ''
+            return `[web_search_call${action} ${status}]`
+        }
+        if (item.type === 'computer_call') {
+            const status = item.status || 'completed'
+            const action = item.action?.type || (Array.isArray(item.actions) && item.actions.length ? 'actions' : '')
+            return `[computer_call${action ? ` ${action}` : ''} ${status}]`
+        }
+        if (item.type === 'computer_call_output') {
+            const callId = item.call_id || item.id || 'computer_call'
+            const output = item.output?.type ? ` ${item.output.type}` : ''
+            return `[computer_call_output ${callId}${output}]`
+        }
+        if (item.type === 'mcp_list_tools') {
+            const server = item.server_label || 'mcp'
+            const toolCount = Array.isArray(item.tools) ? item.tools.length : 0
+            const error = item.error ? `: ${item.error}` : ''
+            return `[${server} list_tools ${error ? 'failed' : 'completed'}: ${toolCount} tools]${error}`
+        }
+        if (item.type === 'mcp_call') {
+            const name = item.name || 'mcp_call'
+            const status = item.status || 'completed'
+            const output = typeof item.output === 'string' ? `: ${item.output}` : item.error ? `: ${item.error}` : ''
+            return `[${name} ${status}]${output}`
+        }
+        if (item.type === 'mcp_approval_request') {
+            const name = item.name || 'mcp_approval_request'
+            return `[${name} approval_required]`
+        }
+        if (item.type === 'mcp_approval_response') {
+            return `[mcp_approval_response ${item.approve ? 'approved' : 'rejected'}]`
+        }
+        if (item.type === 'apply_patch_call') {
+            const operation = item.operation?.type ? ` ${item.operation.type}` : ''
+            const path = item.operation?.path ? ` ${item.operation.path}` : ''
+            const status = item.status || 'completed'
+            return `[apply_patch_call${operation}${path} ${status}]`
+        }
+        if (item.type === 'compaction') {
+            const creator = item.created_by ? ` by ${item.created_by}` : ''
+            return `[compaction${creator}]`
+        }
+        if (item.type?.endsWith?.('_output')) {
+            const output = item.output
+            if (typeof output === 'string') return output
+            if (Array.isArray(output)) {
+                return output
+                    .map(part => {
+                        if (typeof part === 'string') return part
+                        if (part?.stdout || part?.stderr) return [part.stdout, part.stderr].filter(Boolean).join('\n')
+                        return ''
+                    })
+                    .filter(Boolean)
+                    .join('\n')
+            }
+        }
+        return ''
+    }
+
+    upsertResponsesToolCall(state, event) {
+        const toolCallsMap = state.toolCallsMap || state
+        const toolCallAliases = state.toolCallAliases || new Map()
+        const aliases = new Set([event.item_id, event.item?.id, event.item?.call_id].filter(Boolean))
+        const existingKey = [...aliases]
+            .map(alias => toolCallAliases.get(alias) || alias)
+            .find(alias => toolCallsMap.has(alias))
+
+        if (RESPONSES_EXECUTABLE_ITEM_TYPES.has(event.item?.type)) {
+            const normalized = this.normalizeResponsesToolCall(event.item)
+            aliases.add(normalized.id)
+            const key = existingKey || normalized.id
+            const existing = toolCallsMap.get(key) || {
+                id: normalized.id,
+                type: 'function',
+                function: { name: '', arguments: '' }
+            }
+            existing.id = normalized.id
+            existing.function.name = normalized.function.name || existing.function.name
+            existing.function.arguments = normalized.function.arguments || existing.function.arguments
+            toolCallsMap.set(existing.id, existing)
+            if (existing.id !== key) toolCallsMap.delete(key)
+            for (const alias of aliases) toolCallAliases.set(alias, existing.id)
+            return existing
+        }
+
+        const id =
+            existingKey ||
+            event.item_id ||
+            event.item?.id ||
+            event.item?.call_id ||
+            String(event.output_index ?? toolCallsMap.size)
+        const existing = toolCallsMap.get(id) || {
+            id,
+            type: 'function',
+            function: {
+                name: event.name || event.item?.name || event.item?.function?.name || '',
+                arguments: ''
+            }
+        }
+
+        if (event.name) existing.function.name = event.name
+        if (event.input) existing.function.arguments = event.input
+        if (typeof event.delta === 'string') existing.function.arguments += event.delta
+        if (typeof event.arguments === 'string') existing.function.arguments = event.arguments
+        if (state.outputItems && typeof state.outputItems.get === 'function') {
+            const outputKey = this.resolveResponsesOutputItemKey(state, event)
+            const outputItem = outputKey ? state.outputItems.get(outputKey) : null
+            if (outputItem) {
+                if (event.name) outputItem.name = event.name
+                if (event.type?.startsWith?.('response.custom_tool_call_input.')) {
+                    if (event.input) outputItem.input = event.input
+                    if (typeof event.delta === 'string') outputItem.input = (outputItem.input || '') + event.delta
+                } else {
+                    if (event.input) outputItem.arguments = event.input
+                    if (typeof event.delta === 'string')
+                        outputItem.arguments = (outputItem.arguments || '') + event.delta
+                    if (typeof event.arguments === 'string') outputItem.arguments = event.arguments
+                }
+                state.outputItems.set(outputKey, outputItem)
+            }
+        }
+        toolCallsMap.set(existing.id || id, existing)
+        if ((existing.id || id) !== id) toolCallsMap.delete(id)
+        for (const alias of aliases) toolCallAliases.set(alias, existing.id || id)
+        return existing
+    }
+
+    applyResponsesResponseMetadata(state, response, fallbackStatus) {
+        if (!response || typeof response !== 'object') return
+        state.usage = response.usage || state.usage
+        state.status = response.status || fallbackStatus || state.status
+        state.responseId = response.id || state.responseId
+        state.responseModel = response.model || state.responseModel
+        if (response.object === 'response.compaction') {
+            state.status = fallbackStatus || 'completed'
+        }
+        if (Array.isArray(response.output)) {
+            for (const item of response.output) this.upsertResponsesOutputItem(state, item)
+        }
+    }
+
+    getResponsesOutputItemKey(item, event = {}) {
+        return (
+            item?.id ||
+            item?.call_id ||
+            event.item_id ||
+            event.item?.id ||
+            event.item?.call_id ||
+            String(event.output_index ?? '')
+        )
+    }
+
+    resolveResponsesOutputItemKey(state, event = {}, item = null) {
+        const aliases = [item?.id, item?.call_id, event.item_id, event.item?.id, event.item?.call_id].filter(Boolean)
+        for (const alias of aliases) {
+            const key = state.outputItemAliases.get(alias) || alias
+            if (state.outputItems.has(key)) return key
+        }
+        if (event.output_index !== undefined && event.output_index !== null) {
+            const key = state.outputIndexKeys.get(event.output_index)
+            if (key && state.outputItems.has(key)) return key
+        }
+        return this.getResponsesOutputItemKey(item, event)
+    }
+
+    upsertResponsesOutputItem(state, item, event = {}) {
+        if (!item || typeof item !== 'object') return null
+        const key = this.resolveResponsesOutputItemKey(state, event, item)
+        if (!key) return null
+        const aliases = new Set(
+            [key, item.id, item.call_id, event.item_id, event.item?.id, event.item?.call_id].filter(Boolean)
+        )
+        const existingKey =
+            [...aliases]
+                .map(alias => state.outputItemAliases.get(alias) || alias)
+                .find(alias => state.outputItems.has(alias)) || key
+        const existing = state.outputItems.get(existingKey) || {}
+        const merged = { ...existing, ...item }
+        state.outputItems.set(existingKey, merged)
+        for (const alias of aliases) {
+            if (alias !== existingKey) state.outputItems.delete(alias)
+            state.outputItemAliases.set(alias, existingKey)
+        }
+        if (event.output_index !== undefined && event.output_index !== null) {
+            state.outputIndexKeys.set(event.output_index, existingKey)
+        }
+        return merged
+    }
+
+    applyResponsesOutputItemsToState(state) {
+        const response = {
+            id: state.responseId,
+            model: state.responseModel,
+            status: state.status,
+            usage: state.usage,
+            output: Array.from(state.outputItems.values())
+        }
+        const converted = this.responsesOutputToChatCompletion(response)
+        const msg = converted.choices?.[0]?.message || {}
+        state.content = state.content || msg.content || ''
+        state.reasoningContent = state.reasoningContent || msg.reasoning_content || ''
+        for (const tc of this.normalizeExecutableToolCalls(msg.tool_calls || [])) {
+            state.toolCallsMap.set(tc.id, tc)
+        }
+    }
+
+    updateResponsesHostedToolItem(state, event, type, status) {
+        const key = this.resolveResponsesOutputItemKey(state, event)
+        if (!key) return
+        const existing = state.outputItems.get(key) || {
+            id: event.item_id || key,
+            type,
+            status
+        }
+        existing.type = existing.type || type
+        existing.status = status || existing.status
+        if (typeof event.delta === 'string') {
+            existing.arguments = (existing.arguments || '') + event.delta
+        }
+        if (typeof event.arguments === 'string') existing.arguments = event.arguments
+        if (event.type === 'response.mcp_call.failed') existing.status = 'failed'
+        if (event.type === 'response.mcp_call.completed') existing.status = 'completed'
+        if (event.type === 'response.mcp_list_tools.failed') existing.error = existing.error || 'mcp_list_tools failed'
+        state.outputItems.set(key, existing)
+        if (event.item_id) state.outputItemAliases.set(event.item_id, key)
+        if (event.output_index !== undefined && event.output_index !== null)
+            state.outputIndexKeys.set(event.output_index, key)
+    }
+
+    getResponsesPartText(part) {
+        if (!part || typeof part !== 'object') return ''
+        if (part.type === 'output_text' || part.type === 'text') return part.text || ''
+        if (part.type === 'refusal') return part.refusal || ''
+        if (part.type === 'reasoning_text' || part.type === 'summary_text') return part.text || ''
+        return ''
+    }
+
+    applyResponsesContentPart(state, event) {
+        const part = event.part
+        if (!part || typeof part !== 'object') return []
+        if (event.item_id) {
+            const key = state.outputItemAliases.get(event.item_id) || event.item_id
+            const existing = state.outputItems.get(key) || {
+                id: event.item_id,
+                type: 'message',
+                role: 'assistant',
+                content: []
+            }
+            existing.type = existing.type || 'message'
+            existing.role = existing.role || 'assistant'
+            existing.content = Array.isArray(existing.content) ? existing.content : []
+            existing.content[event.content_index || 0] = part
+            state.outputItems.set(key, existing)
+            state.outputItemAliases.set(event.item_id, key)
+            if (event.output_index !== undefined && event.output_index !== null)
+                state.outputIndexKeys.set(event.output_index, key)
+        }
+
+        const text = this.getResponsesPartText(part)
+        if (!text) return []
+        if (part.type === 'reasoning_text' || part.type === 'summary_text') {
+            if (!state.reasoningContent) {
+                state.reasoningContent = text
+                return [{ type: 'reasoning_delta', text }]
+            }
+            return []
+        }
+        if (!state.content) {
+            state.content = text
+            return [{ type: 'text', text }]
+        }
+        return []
+    }
+
+    applyResponsesTextAnnotation(state, event) {
+        if (!event.item_id) return
+        const existing = state.outputItems.get(this.resolveResponsesOutputItemKey(state, event))
+        if (!existing || !Array.isArray(existing.content)) return
+        const contentIndex = event.content_index || 0
+        const part = existing.content[contentIndex]
+        if (!part || typeof part !== 'object') return
+        const annotations = Array.isArray(part.annotations) ? [...part.annotations] : []
+        annotations[event.annotation_index || annotations.length] = event.annotation
+        part.annotations = annotations.filter(item => item !== undefined)
     }
 
     responsesOutputToChatCompletion(response) {
@@ -409,12 +971,15 @@ export class OpenAIClient extends AbstractClient {
                     if (part.type === 'reasoning_text' || part.type === 'summary_text')
                         reasoningContent += part.text || ''
                 }
-            } else if (item.type === 'function_call') {
+            } else if (RESPONSES_EXECUTABLE_ITEM_TYPES.has(item.type)) {
                 toolCalls.push(this.normalizeResponsesToolCall(item))
             } else if (item.type === 'reasoning') {
                 for (const part of item.summary || item.content || []) {
                     if (part.text) reasoningContent += part.text
                 }
+            } else {
+                const itemText = this.responsesOutputItemToText(item)
+                if (itemText) content += (content ? '\n' : '') + itemText
             }
         }
 
@@ -427,9 +992,14 @@ export class OpenAIClient extends AbstractClient {
             failed: 'error',
             incomplete: 'length'
         }
+        const finishReason =
+            response.object === 'response.compaction' && !response.status
+                ? 'stop'
+                : finishReasonMap[response.status] || response.status
 
         return {
             id: response.id,
+            model: response.model,
             choices: [
                 {
                     message: {
@@ -438,246 +1008,303 @@ export class OpenAIClient extends AbstractClient {
                         reasoning_content: reasoningContent || null,
                         tool_calls: toolCalls.length ? toolCalls : undefined
                     },
-                    finish_reason: finishReasonMap[response.status] || response.status
+                    finish_reason: finishReason
                 }
             ],
-            usage: {
-                prompt_tokens: response.usage?.input_tokens,
-                completion_tokens: response.usage?.output_tokens,
-                total_tokens: response.usage?.total_tokens,
-                completion_tokens_details: {
-                    reasoning_tokens: response.usage?.output_tokens_details?.reasoning_tokens
-                },
-                prompt_tokens_details: {
-                    cached_tokens: response.usage?.input_tokens_details?.cached_tokens
-                }
-            }
+            usage: attachUsageModel(response.usage || {}, response.model)
         }
     }
 
-    async collectResponsesStream(stream) {
-        let content = ''
-        let reasoningContent = ''
-        const toolCallsMap = new Map()
-        let usage = null
-        let status = null
-        let responseId = null
+    createResponsesStreamState() {
+        return {
+            content: '',
+            reasoningContent: '',
+            toolCallsMap: new Map(),
+            outputItems: new Map(),
+            outputItemAliases: new Map(),
+            outputIndexKeys: new Map(),
+            toolCallAliases: new Map(),
+            usage: null,
+            status: null,
+            responseId: null,
+            responseModel: null
+        }
+    }
 
-        for await (const event of stream) {
-            if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
-                content += event.delta || ''
-            } else if (event.type === 'response.reasoning_text.delta') {
-                reasoningContent += event.delta || ''
-            } else if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
-                const toolCall = this.normalizeResponsesToolCall(event.item)
-                toolCallsMap.set(toolCall.id, toolCall)
-            } else if (event.type === 'response.completed' || event.type === 'response.done') {
-                usage = event.response?.usage || usage
-                status = event.response?.status || 'completed'
-                responseId = event.response?.id || responseId
-                const converted = this.responsesOutputToChatCompletion(event.response || {})
-                const msg = converted.choices?.[0]?.message || {}
-                content = content || msg.content || ''
-                reasoningContent = reasoningContent || msg.reasoning_content || ''
-                for (const tc of msg.tool_calls || []) toolCallsMap.set(tc.id, tc)
-            } else if (event.type === 'response.failed') {
-                throw new Error(event.response?.error?.message || event.error?.message || 'OpenAI Responses API failed')
-            } else if (event.type === 'response.incomplete') {
-                usage = event.response?.usage || usage
-                status = event.response?.status || 'incomplete'
-                responseId = event.response?.id || responseId
-                const converted = this.responsesOutputToChatCompletion(event.response || {})
-                const msg = converted.choices?.[0]?.message || {}
-                content = content || msg.content || ''
-                reasoningContent = reasoningContent || msg.reasoning_content || ''
-            } else if (event.type === 'error') {
-                throw new Error(event.error?.message || event.message || 'OpenAI Responses API stream error')
+    applyResponsesStreamEvent(state, event) {
+        if (!event?.type) return []
+        const updates = []
+
+        if (event.type === 'response.audio.transcript.delta') {
+            const text = event.delta || ''
+            state.content += text
+            if (text) updates.push({ type: 'text', text })
+        } else if (event.type === 'response.audio.transcript.done') {
+            // Transcript text is accumulated from response.audio.transcript.delta.
+        } else if (event.type === 'response.audio.delta' || event.type === 'response.audio.done') {
+            // Audio bytes are not surfaced as chat text; transcript events carry readable content.
+        } else if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
+            const text = event.delta || ''
+            state.content += text
+            if (text) updates.push({ type: 'text', text })
+        } else if (event.type === 'response.output_text.done' || event.type === 'response.text.done') {
+            if (!state.content && event.text) {
+                state.content = event.text
+                updates.push({ type: 'text', text: event.text })
             }
+        } else if (event.type === 'response.content_part.added' || event.type === 'response.content_part.done') {
+            updates.push(...this.applyResponsesContentPart(state, event))
+        } else if (event.type === 'response.refusal.delta') {
+            const text = event.delta || ''
+            state.content += text
+            if (text) updates.push({ type: 'text', text })
+        } else if (event.type === 'response.refusal.done') {
+            if (!state.content && event.refusal) {
+                state.content = event.refusal
+                updates.push({ type: 'text', text: event.refusal })
+            }
+        } else if (event.type === 'response.reasoning_text.delta') {
+            const text = event.delta || ''
+            state.reasoningContent += text
+            if (text) updates.push({ type: 'reasoning_delta', text })
+        } else if (event.type === 'response.reasoning_text.done') {
+            if (!state.reasoningContent && event.text) {
+                state.reasoningContent = event.text
+                updates.push({ type: 'reasoning_delta', text: event.text })
+            }
+        } else if (
+            event.type === 'response.output_item.added' ||
+            event.type === 'response.output_item.done' ||
+            event.type === 'response.function_call_arguments.delta' ||
+            event.type === 'response.function_call_arguments.done' ||
+            event.type === 'response.custom_tool_call_input.delta' ||
+            event.type === 'response.custom_tool_call_input.done'
+        ) {
+            if (event.item) this.upsertResponsesOutputItem(state, event.item, event)
+            if (
+                RESPONSES_EXECUTABLE_ITEM_TYPES.has(event.item?.type) ||
+                event.type.startsWith('response.function_call_arguments.') ||
+                event.type.startsWith('response.custom_tool_call_input.')
+            ) {
+                this.upsertResponsesToolCall(state, event)
+                updates.push({ type: 'tool_calls_delta' })
+            }
+        } else if (event.type === 'response.created') {
+            this.applyResponsesResponseMetadata(state, event.response, 'queued')
+        } else if (event.type === 'response.queued') {
+            this.applyResponsesResponseMetadata(state, event.response, 'queued')
+        } else if (event.type === 'response.in_progress') {
+            this.applyResponsesResponseMetadata(state, event.response, 'in_progress')
+        } else if (event.type === 'response.reasoning_summary_text.delta') {
+            const text = event.delta || ''
+            state.reasoningContent += text
+            if (text) updates.push({ type: 'reasoning_delta', text })
+        } else if (event.type === 'response.reasoning_summary_text.done') {
+            if (!state.reasoningContent && event.text) {
+                state.reasoningContent = event.text
+                updates.push({ type: 'reasoning_delta', text: event.text })
+            }
+        } else if (
+            event.type === 'response.reasoning_summary_part.added' ||
+            event.type === 'response.reasoning_summary_part.done'
+        ) {
+            const text = this.getResponsesPartText(event.part)
+            if (text && !state.reasoningContent) {
+                state.reasoningContent = text
+                updates.push({ type: 'reasoning_delta', text })
+            }
+        } else if (event.type === 'response.output_text.annotation.added') {
+            this.applyResponsesTextAnnotation(state, event)
+        } else if (event.type === 'response.code_interpreter_call_code.delta') {
+            this.updateResponsesHostedToolItem(state, event, 'code_interpreter_call', 'in_progress')
+        } else if (event.type === 'response.code_interpreter_call_code.done') {
+            this.updateResponsesHostedToolItem(state, event, 'code_interpreter_call', 'interpreting')
+            const item = state.outputItems.get(this.resolveResponsesOutputItemKey(state, event))
+            if (item && event.code) item.code = event.code
+        } else if (event.type === 'response.code_interpreter_call.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'code_interpreter_call', 'in_progress')
+        } else if (event.type === 'response.code_interpreter_call.interpreting') {
+            this.updateResponsesHostedToolItem(state, event, 'code_interpreter_call', 'interpreting')
+        } else if (event.type === 'response.code_interpreter_call.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'code_interpreter_call', 'completed')
+        } else if (event.type === 'response.image_generation_call.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'image_generation_call', 'in_progress')
+        } else if (event.type === 'response.image_generation_call.generating') {
+            this.updateResponsesHostedToolItem(state, event, 'image_generation_call', 'generating')
+        } else if (event.type === 'response.image_generation_call.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'image_generation_call', 'completed')
+        } else if (event.type === 'response.image_generation_call.partial_image') {
+            this.updateResponsesHostedToolItem(state, event, 'image_generation_call', 'generating')
+        } else if (event.type === 'response.file_search_call.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'file_search_call', 'in_progress')
+        } else if (event.type === 'response.file_search_call.searching') {
+            this.updateResponsesHostedToolItem(state, event, 'file_search_call', 'searching')
+        } else if (event.type === 'response.file_search_call.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'file_search_call', 'completed')
+        } else if (event.type === 'response.web_search_call.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'web_search_call', 'in_progress')
+        } else if (event.type === 'response.web_search_call.searching') {
+            this.updateResponsesHostedToolItem(state, event, 'web_search_call', 'searching')
+        } else if (event.type === 'response.web_search_call.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'web_search_call', 'completed')
+        } else if (event.type === 'response.mcp_call_arguments.delta') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_call', 'calling')
+        } else if (event.type === 'response.mcp_call_arguments.done') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_call', 'calling')
+        } else if (event.type === 'response.mcp_call.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_call', 'in_progress')
+        } else if (event.type === 'response.mcp_call.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_call', 'completed')
+        } else if (event.type === 'response.mcp_call.failed') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_call', 'failed')
+        } else if (event.type === 'response.mcp_list_tools.in_progress') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_list_tools', 'in_progress')
+        } else if (event.type === 'response.mcp_list_tools.completed') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_list_tools', 'completed')
+        } else if (event.type === 'response.mcp_list_tools.failed') {
+            this.updateResponsesHostedToolItem(state, event, 'mcp_list_tools', 'failed')
+        } else if (event.type === 'response.completed' || event.type === 'response.done') {
+            this.applyResponsesResponseMetadata(state, event.response, 'completed')
+            this.applyResponsesOutputItemsToState(state)
+            if (state.usage) updates.push({ type: 'usage', usage: attachUsageModel(state.usage, state.responseModel) })
+        } else if (event.type === 'response.incomplete') {
+            this.applyResponsesResponseMetadata(state, event.response, 'incomplete')
+            this.applyResponsesOutputItemsToState(state)
+            if (state.usage) updates.push({ type: 'usage', usage: attachUsageModel(state.usage, state.responseModel) })
+        } else if (event.type === 'response.failed') {
+            throw new Error(event.response?.error?.message || event.error?.message || 'OpenAI Responses API failed')
+        } else if (event.type === 'response.error' || event.type === 'error') {
+            throw new Error(event.error?.message || event.message || 'OpenAI Responses API stream error')
         }
 
+        return updates
+    }
+
+    responsesStreamStateToChatCompletion(state) {
         return {
-            id: responseId,
+            id: state.responseId,
+            model: state.responseModel,
             choices: [
                 {
                     message: {
                         role: 'assistant',
-                        content: content || null,
-                        reasoning_content: reasoningContent || null,
-                        tool_calls: toolCallsMap.size ? Array.from(toolCallsMap.values()) : undefined
+                        content: state.content || null,
+                        reasoning_content: state.reasoningContent || null,
+                        tool_calls: state.toolCallsMap.size
+                            ? this.normalizeExecutableToolCalls(Array.from(state.toolCallsMap.values()))
+                            : undefined
                     },
-                    finish_reason: status === 'completed' ? 'stop' : status === 'incomplete' ? 'length' : status
+                    finish_reason:
+                        state.status === 'completed' ? 'stop' : state.status === 'incomplete' ? 'length' : state.status
                 }
             ],
-            usage: usage
-                ? {
-                      prompt_tokens: usage.input_tokens,
-                      completion_tokens: usage.output_tokens,
-                      total_tokens: usage.total_tokens,
-                      completion_tokens_details: {
-                          reasoning_tokens: usage.output_tokens_details?.reasoning_tokens
-                      },
-                      prompt_tokens_details: {
-                          cached_tokens: usage.input_tokens_details?.cached_tokens
-                      }
-                  }
-                : {}
+            usage: state.usage ? attachUsageModel(state.usage, state.responseModel) : {}
         }
     }
 
-    buildRealtimeWsUrl() {
-        const base = this.options?.experimental?.ws?.baseUrl || this.baseUrl || 'https://api.openai.com/v1'
-        const url = new URL(base)
-        url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:'
-        const basePath = url.pathname.replace(/\/+$/, '').replace(/\/responses$/, '')
-        const responsePath = this.getOpenAIResponsePath()
-        url.pathname = basePath + (responsePath.startsWith('/') ? responsePath : '/' + responsePath)
-        return url.toString()
-    }
+    async collectResponsesStream(stream) {
+        const state = this.createResponsesStreamState()
 
-    responseInputContentToRealtimeContent(content) {
-        if (typeof content === 'string') return [{ type: 'input_text', text: content }]
-        if (!Array.isArray(content)) return [{ type: 'input_text', text: String(content || '') }]
-        return content
-            .map(item => {
-                if (!item || typeof item !== 'object') return null
-                if (item.type === 'input_text') return item
-                if (item.type === 'text') return { type: 'input_text', text: item.text || '' }
-                return null
-            })
-            .filter(Boolean)
-    }
-
-    responsesInputToRealtimeText(input) {
-        const parts = []
-        for (const item of input || []) {
-            if (item.role === 'user' || item.role === 'system' || item.role === 'assistant') {
-                for (const part of this.responseInputContentToRealtimeContent(item.content)) {
-                    if (part.text) parts.push(`${item.role}: ${part.text}`)
-                }
-            } else if (item.type === 'function_call_output') {
-                parts.push(`tool: ${item.output || ''}`)
-            }
-        }
-        return parts.join('\n')
-    }
-
-    async createResponsesViaWebSocket(apiKey, responsesPayload) {
-        if (responsesPayload.tools?.length) {
-            logger.warn('[OpenAI适配器] Responses WebSocket 暂不处理工具调用，已回退到 HTTP Responses API')
-            return null
+        for await (const event of stream) {
+            this.applyResponsesStreamEvent(state, event)
         }
 
-        const wsUrl = this.options?.experimental?.ws?.url || this.buildRealtimeWsUrl()
-        const wsHeaders = {
-            Authorization: `Bearer ${apiKey}`,
-            Accept: 'application/json'
+        return this.responsesStreamStateToChatCompletion(state)
+    }
+
+    async createResponsesViaSdkWebSocket(client, responsesPayload, options = {}) {
+        const wsConfig = resolveOpenAIWsOptions(options, this.options)
+        const ResponsesWS = await this.resolveResponsesWSClass(wsConfig)
+        if (!ResponsesWS) {
+            throw new Error('openai/resources/responses/ws did not export ResponsesWS')
         }
 
-        return await new Promise((resolve, reject) => {
-            const ws = new WebSocket(wsUrl, { headers: wsHeaders })
-            let text = ''
-            let usage = null
-            let responseId = null
-            let status = null
-            let completedResponse = null
-            let settled = false
-            const timeout = setTimeout(() => {
-                if (!settled) {
-                    settled = true
-                    ws.close()
-                    reject(new Error('OpenAI Responses websocket timeout'))
-                }
-            }, this.options?.experimental?.ws?.timeout || 60000)
+        const timeoutMs = wsConfig.timeout || 60000
+        const { enabled, timeout, url, headers, ResponsesWSClass, ...sdkWsOptions } = wsConfig
+        const wsOptions = { ...sdkWsOptions }
+        const wsHeaders = headers
+        if (wsHeaders && typeof wsHeaders === 'object') {
+            wsOptions.headers = wsHeaders
+        }
 
-            const finish = result => {
-                if (settled) return
-                settled = true
-                clearTimeout(timeout)
-                ws.close()
-                resolve(result)
-            }
+        const sdkClient = this.createResponsesWSClient(client, url)
+        const ws = new ResponsesWS(sdkClient, wsOptions)
+        const responsePayload = { ...responsesPayload }
+        delete responsePayload.stream
+        const responseCreateEvent = { type: 'response.create', ...responsePayload }
+        const state = this.createResponsesStreamState()
+        const terminalEvents = new Set(['response.completed', 'response.done', 'response.incomplete'])
+        let completed = false
+        let timeoutHandle
 
-            const fail = error => {
-                if (settled) return
-                settled = true
-                clearTimeout(timeout)
-                ws.close()
-                reject(error)
-            }
-
-            ws.on('open', () => {
-                const message = { type: 'response.create', ...responsesPayload }
-                delete message.stream
-                ws.send(JSON.stringify(message))
-            })
-
-            ws.on('message', data => {
-                let event
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => {
                 try {
-                    event = JSON.parse(data.toString())
-                } catch {
-                    return
-                }
-
-                if (event.type === 'response.created' || event.type === 'response.in_progress') {
-                    responseId = event.response?.id || event.response_id || responseId
-                    status = event.response?.status || status
-                } else if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
-                    text += event.delta || ''
-                } else if (event.type === 'response.output_text.done' || event.type === 'response.content_part.done') {
-                    if (event.text && !text) text = event.text
-                    if (event.part?.type === 'output_text' && event.part?.text && !text) text = event.part.text
-                } else if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
-                    completedResponse = completedResponse || { output: [] }
-                    completedResponse.output.push(event.item)
-                } else if (event.type === 'response.completed' || event.type === 'response.done') {
-                    usage = event.response?.usage || usage
-                    responseId = event.response?.id || event.response_id || responseId
-                    status = event.response?.status || 'completed'
-                    completedResponse = event.response || completedResponse
-                    finish({
-                        id: responseId,
-                        output_text: text || event.response?.output_text || '',
-                        output: completedResponse?.output || [
-                            {
-                                type: 'message',
-                                content: [{ type: 'output_text', text }]
-                            }
-                        ],
-                        status,
-                        usage
-                    })
-                } else if (event.type === 'response.incomplete') {
-                    usage = event.response?.usage || usage
-                    responseId = event.response?.id || event.response_id || responseId
-                    completedResponse = event.response || completedResponse
-                    finish({
-                        id: responseId,
-                        output_text: text || event.response?.output_text || '',
-                        output: completedResponse?.output || [
-                            {
-                                type: 'message',
-                                content: [{ type: 'output_text', text }]
-                            }
-                        ],
-                        status: 'incomplete',
-                        usage
-                    })
-                } else if (event.type === 'response.failed') {
-                    fail(
-                        new Error(
-                            event.response?.error?.message ||
-                                event.error?.message ||
-                                'OpenAI Responses websocket failed'
-                        )
-                    )
-                } else if (event.type === 'error') {
-                    fail(new Error(event.error?.message || event.message || 'OpenAI Responses websocket error'))
-                }
-            })
-
-            ws.on('error', fail)
+                    ws.close({ code: 1000, reason: 'timeout' })
+                } catch {}
+                reject(new Error('OpenAI Responses websocket timeout'))
+            }, timeoutMs)
         })
+
+        try {
+            const iterator = ws.stream()
+            ws.send(responseCreateEvent)
+
+            while (!completed) {
+                const next = await Promise.race([iterator.next(), timeoutPromise])
+                if (next.done) break
+
+                const frame = next.value
+                if (!frame) continue
+
+                if (frame.type === 'message') {
+                    this.applyResponsesStreamEvent(state, frame.message)
+                    if (terminalEvents.has(frame.message?.type)) completed = true
+                } else if (frame.type === 'error') {
+                    throw frame.error || new Error('OpenAI Responses websocket error')
+                } else if (frame.type === 'close') {
+                    if (!completed) {
+                        throw new Error(
+                            `OpenAI Responses websocket closed before completion: ${frame.code} ${frame.reason || ''}`.trim()
+                        )
+                    }
+                }
+            }
+
+            if (!completed && !state.status) {
+                throw new Error('OpenAI Responses websocket closed before completion')
+            }
+
+            return this.responsesStreamStateToChatCompletion(state)
+        } finally {
+            clearTimeout(timeoutHandle)
+            try {
+                ws.close({ code: 1000, reason: 'OK' })
+            } catch {}
+        }
+    }
+
+    createResponsesWSClient(client, explicitWsUrl) {
+        const responsePath = this.getOpenAIResponsePath()
+        if (!explicitWsUrl && (!responsePath || responsePath === '/responses')) return client
+
+        const sdkClient = Object.create(client)
+        sdkClient.apiKey = client.apiKey
+        sdkClient.buildURL = (path, query, defaultBaseURL) => {
+            if (path === '/responses' && explicitWsUrl) {
+                const baseUrl = `${this.baseUrl || 'https://api.openai.com/v1'}`.replace(/\/?$/, '/')
+                const url = new URL(String(explicitWsUrl).trim(), baseUrl)
+                if (query && typeof query === 'object') {
+                    for (const [key, value] of Object.entries(query)) {
+                        if (value !== undefined && value !== null) url.searchParams.set(key, String(value))
+                    }
+                }
+                return url.toString()
+            }
+            const mappedPath = path === '/responses' ? responsePath : path
+            return client.buildURL(mappedPath, query, defaultBaseURL)
+        }
+        return sdkClient
     }
 
     async _sendMessage(histories, apiKey, options) {
@@ -784,54 +1411,48 @@ export class OpenAIClient extends AbstractClient {
         messages.length = 0
         messages.push(...validatedMessages)
 
+        const useResponsesApi = this.shouldUseOpenAIResponses(options)
         const toolConvert = getFromChaiteToolConverter('openai')
-        let toolChoice = 'auto'
-
-        if (options.toolChoice?.type) {
-            switch (options.toolChoice.type) {
-                case 'auto':
-                    break
-                case 'none':
-                    toolChoice = 'none'
-                    break
-                case 'any':
-                    toolChoice = 'required'
-                    break
-                case 'specified': {
-                    if (!options.toolChoice.tools || options.toolChoice.tools.length === 0) {
-                        throw new Error('`toolChoice.tools` must be set if `toolChoice.type` is set to `specified`')
-                    }
-                    toolChoice = {
-                        type: 'function',
-                        function: {
-                            name: options.toolChoice.tools[0]
-                        }
-                    }
-                    break
-                }
-            }
-        }
-
-        // 当 toolChoice 为 'none' 时，完全不传递 tools 参数，强制LLM只生成文本
-        const shouldDisableTools = toolChoice === 'none'
-        let tools = shouldDisableTools ? [] : this.tools.map(toolConvert)
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const openaiResponses = resolveOpenAIResponsesOptions(options, this.options)
+        const choiceResolution = resolveToolChoice(
+            useResponsesApi ? { ...options, openaiResponses } : options,
+            convertedTools,
+            useResponsesApi ? 'openai-responses' : 'openai-chat'
+        )
+        let tools = choiceResolution.disabled
+            ? []
+            : useResponsesApi
+              ? mergeResponseTools(choiceResolution.tools, openaiResponses)
+              : choiceResolution.tools
+        let toolChoice = choiceResolution.toolChoice
 
         // Gemini API 要求 enum 值必须是字符串类型，清理所有工具定义
         if (isGeminiModel && tools.length > 0) {
-            tools = tools.map(tool => sanitizeToolEnums(tool))
+            tools = tools.map(tool => sanitizeToolWithMetadata(tool))
         }
+        options._exposedTools = tools
 
         // 根据 options.stream 决定是否使用流式
         const useStream = options.stream === true
 
         const requestPayload = {
             temperature: options.temperature,
+            top_p: options.topP ?? options.top_p,
             messages,
             model,
             stream: useStream,
             stream_options: useStream ? { include_usage: true } : undefined,
             tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? toolChoice : undefined
+            tool_choice: tools.length > 0 || useResponsesApi ? toolChoice : undefined,
+            instructions: options.instructions,
+            metadata: options.metadata,
+            parallel_tool_calls: options.parallelToolCalls ?? options.parallel_tool_calls,
+            prompt_cache_key: options.promptCacheKey ?? options.prompt_cache_key,
+            prompt_cache_retention: options.promptCacheRetention ?? options.prompt_cache_retention,
+            service_tier: options.serviceTier ?? options.service_tier,
+            text: options.text,
+            truncation: options.truncation
         }
 
         if (isThinkingModel) {
@@ -863,7 +1484,6 @@ export class OpenAIClient extends AbstractClient {
 
         applyVendorThinkingPayload(requestPayload, enableReasoning, this.baseUrl, thinkingVendorControl)
 
-        const useResponsesApi = this.shouldUseOpenAIResponses(options)
         if (useResponsesApi) {
             requestPayload.stream = this.shouldUseExperimentalOpenAIWs(options) ? false : useStream
             delete requestPayload.stream_options
@@ -894,17 +1514,20 @@ export class OpenAIClient extends AbstractClient {
                 const responsesPayload = this.buildResponsesPayload(requestPayload, options)
                 if (this.shouldUseExperimentalOpenAIWs(options)) {
                     try {
-                        response = await this.createResponsesViaWebSocket(apiKey, responsesPayload)
+                        response = await this.createResponsesViaSdkWebSocket(client, responsesPayload, options)
+                        chatCompletion = response
                     } catch (wsError) {
                         logger.warn(
                             `[OpenAI适配器] Responses WebSocket 调用失败，回退到 HTTP Responses API: ${wsError.message}`
                         )
                     }
                 }
-                response = response || (await client.responses.create(responsesPayload))
-                chatCompletion = responsesPayload.stream
-                    ? await this.collectResponsesStream(response)
-                    : this.responsesOutputToChatCompletion(response)
+                if (!chatCompletion) {
+                    response = await client.responses.create(responsesPayload)
+                    chatCompletion = responsesPayload.stream
+                        ? await this.collectResponsesStream(response)
+                        : this.responsesOutputToChatCompletion(response)
+                }
             } else {
                 response = await client.chat.completions.create(requestPayload)
             }
@@ -917,10 +1540,12 @@ export class OpenAIClient extends AbstractClient {
                 const toolCallsMap = new Map()
                 let finishReason = null
                 let usage = null
+                let responseModel = null
                 let chunkCount = 0
 
                 for await (const chunk of response) {
                     chunkCount++
+                    responseModel = chunk.model || responseModel
                     const delta = chunk.choices[0]?.delta || {}
                     const content = delta.content || ''
                     const reasoningContent = delta.reasoning_content || ''
@@ -932,18 +1557,7 @@ export class OpenAIClient extends AbstractClient {
                     if (delta.tool_calls) {
                         logger.debug(`[OpenAI适配器] Stream chunk ${chunkCount}: 检测到tool_calls`)
                         for (const tc of delta.tool_calls) {
-                            const idx = tc.index
-                            if (!toolCallsMap.has(idx)) {
-                                toolCallsMap.set(idx, {
-                                    id: tc.id || '',
-                                    type: tc.type || 'function',
-                                    function: { name: tc.function?.name || '', arguments: '' }
-                                })
-                            }
-                            const existing = toolCallsMap.get(idx)
-                            if (tc.id) existing.id = tc.id
-                            if (tc.function?.name) existing.function.name = tc.function.name
-                            if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
+                            this.upsertChatToolCall(toolCallsMap, tc)
                         }
                     }
 
@@ -1013,7 +1627,9 @@ export class OpenAIClient extends AbstractClient {
                 }
 
                 // 构建完整的响应对象
-                const toolCalls = Array.from(toolCallsMap.values()).filter(tc => tc.id && tc.function.name)
+                const toolCalls = this.normalizeExecutableToolCalls(
+                    Array.from(toolCallsMap.values()).filter(tc => tc.id && tc.function.name)
+                )
                 chatCompletion = {
                     choices: [
                         {
@@ -1027,6 +1643,10 @@ export class OpenAIClient extends AbstractClient {
                         }
                     ],
                     usage: usage || {}
+                }
+                if (responseModel) {
+                    chatCompletion.model = responseModel
+                    chatCompletion.usage = attachUsageModel(chatCompletion.usage, responseModel)
                 }
 
                 logger.debug(
@@ -1175,16 +1795,11 @@ export class OpenAIClient extends AbstractClient {
             toolCalls
         }
 
-        const usage = {
-            promptTokens: chatCompletion.usage?.prompt_tokens,
-            completionTokens: chatCompletion.usage?.completion_tokens,
-            totalTokens: chatCompletion.usage?.total_tokens,
-            cachedTokens: chatCompletion.usage?.prompt_tokens_details?.cached_tokens,
-            reasoningTokens: chatCompletion.usage?.completion_tokens_details?.reasoning_tokens
-        }
+        const usage = attachUsageModel(chatCompletion.usage || {}, chatCompletion.model || model)
 
         return {
             ...result,
+            model: chatCompletion.model || model,
             usage
         }
     }
@@ -1262,46 +1877,40 @@ export class OpenAIClient extends AbstractClient {
         messages.length = 0
         messages.push(...validatedMessages)
 
+        const useResponsesApi = this.shouldUseOpenAIResponses(options)
         const toolConvert = getFromChaiteToolConverter('openai')
-        let toolChoice = 'auto'
-
-        if (options.toolChoice?.type) {
-            switch (options.toolChoice.type) {
-                case 'auto':
-                    break
-                case 'none':
-                    toolChoice = 'none'
-                    break
-                case 'any':
-                    toolChoice = 'required'
-                    break
-                case 'specified': {
-                    if (!options.toolChoice.tools || options.toolChoice.tools.length === 0) {
-                        throw new Error('`toolChoice.tools` must be set if `toolChoice.type` is set to `specified`')
-                    }
-                    toolChoice = {
-                        type: 'function',
-                        function: {
-                            name: options.toolChoice.tools[0]
-                        }
-                    }
-                    break
-                }
-            }
-        }
-
-        // 当 toolChoice 为 'none' 时，完全不传递 tools 参数，强制LLM只生成文本
-        const shouldDisableTools = toolChoice === 'none'
-        const tools = shouldDisableTools ? [] : this.tools.map(toolConvert)
+        const convertedTools = this.tools.map(toolConvert).filter(Boolean)
+        const openaiResponses = resolveOpenAIResponsesOptions(options, this.options)
+        const choiceResolution = resolveToolChoice(
+            useResponsesApi ? { ...options, openaiResponses } : options,
+            convertedTools,
+            useResponsesApi ? 'openai-responses' : 'openai-chat'
+        )
+        const tools = choiceResolution.disabled
+            ? []
+            : useResponsesApi
+              ? mergeResponseTools(choiceResolution.tools, openaiResponses)
+              : choiceResolution.tools
+        let toolChoice = choiceResolution.toolChoice
+        options._exposedTools = tools
 
         const requestPayload = {
             temperature: options.temperature,
+            top_p: options.topP ?? options.top_p,
             messages,
             model,
             tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? toolChoice : undefined,
+            tool_choice: tools.length > 0 || useResponsesApi ? toolChoice : undefined,
             stream: true,
-            stream_options: { include_usage: true }
+            stream_options: { include_usage: true },
+            instructions: options.instructions,
+            metadata: options.metadata,
+            parallel_tool_calls: options.parallelToolCalls ?? options.parallel_tool_calls,
+            prompt_cache_key: options.promptCacheKey ?? options.prompt_cache_key,
+            prompt_cache_retention: options.promptCacheRetention ?? options.prompt_cache_retention,
+            service_tier: options.serviceTier ?? options.service_tier,
+            text: options.text,
+            truncation: options.truncation
         }
 
         if (isThinkingModel) {
@@ -1332,7 +1941,6 @@ export class OpenAIClient extends AbstractClient {
             })
         )
 
-        const useResponsesApi = this.shouldUseOpenAIResponses(options)
         let stream
         try {
             if (useResponsesApi) {
@@ -1360,51 +1968,29 @@ export class OpenAIClient extends AbstractClient {
             const toolCallsMap = new Map() // id -> {id, type, function: {name, arguments}}
             let hasToolCalls = false
             let finalUsage = null // 流式模式下的usage信息
+            let streamResponseModel = null
+            const responsesState = useResponsesApi ? self.createResponsesStreamState() : null
+            let responsesTextEmitted = 0
 
             for await (const chunk of stream) {
                 if (useResponsesApi) {
-                    if (chunk.type === 'response.output_text.delta' || chunk.type === 'response.text.delta') {
-                        yield { type: 'text', text: chunk.delta || '' }
-                    } else if (chunk.type === 'response.reasoning_text.delta') {
-                        allReasoning += chunk.delta || ''
-                    } else if (chunk.type === 'response.output_item.done' && chunk.item?.type === 'function_call') {
-                        hasToolCalls = true
-                        const toolCall = self.normalizeResponsesToolCall(chunk.item)
-                        toolCallsMap.set(toolCall.id, toolCall)
-                    } else if (chunk.type === 'response.completed' || chunk.type === 'response.done') {
-                        const usage = chunk.response?.usage
-                        if (usage) {
-                            finalUsage = {
-                                promptTokens: usage.input_tokens,
-                                completionTokens: usage.output_tokens,
-                                totalTokens: usage.total_tokens,
-                                cachedTokens: usage.input_tokens_details?.cached_tokens || 0,
-                                reasoningTokens: usage.output_tokens_details?.reasoning_tokens || 0
-                            }
+                    const updates = self.applyResponsesStreamEvent(responsesState, chunk)
+                    for (const update of updates) {
+                        if (update.type === 'text' && update.text) {
+                            responsesTextEmitted += update.text.length
+                            yield { type: 'text', text: update.text }
+                        } else if (update.type === 'usage') {
+                            finalUsage = attachUsageModel(update.usage, responsesState.responseModel)
                         }
-                        const converted = self.responsesOutputToChatCompletion(chunk.response || {})
-                        for (const tc of converted.choices?.[0]?.message?.tool_calls || []) {
-                            hasToolCalls = true
-                            toolCallsMap.set(tc.id, tc)
-                        }
-                    } else if (chunk.type === 'response.failed' || chunk.type === 'error') {
-                        throw new Error(
-                            chunk.response?.error?.message || chunk.error?.message || 'OpenAI Responses stream error'
-                        )
                     }
                     continue
                 }
 
                 // 捕获usage信息（在最后一个chunk中）
                 if (chunk.usage) {
-                    finalUsage = {
-                        promptTokens: chunk.usage.prompt_tokens,
-                        completionTokens: chunk.usage.completion_tokens,
-                        totalTokens: chunk.usage.total_tokens,
-                        cachedTokens: chunk.usage.prompt_tokens_details?.cached_tokens || 0,
-                        reasoningTokens: chunk.usage.completion_tokens_details?.reasoning_tokens || 0
-                    }
+                    finalUsage = attachUsageModel(chunk.usage, chunk.model || streamResponseModel)
                 }
+                streamResponseModel = chunk.model || streamResponseModel
 
                 const delta = chunk.choices?.[0]?.delta || {}
                 const content = delta.content || ''
@@ -1415,18 +2001,7 @@ export class OpenAIClient extends AbstractClient {
                 // 处理 tool_calls（流式累积）
                 for (const tc of toolCallsDelta) {
                     hasToolCalls = true
-                    const idx = tc.index
-                    if (!toolCallsMap.has(idx)) {
-                        toolCallsMap.set(idx, {
-                            id: tc.id || '',
-                            type: tc.type || 'function',
-                            function: { name: '', arguments: '' }
-                        })
-                    }
-                    const existing = toolCallsMap.get(idx)
-                    if (tc.id) existing.id = tc.id
-                    if (tc.function?.name) existing.function.name += tc.function.name
-                    if (tc.function?.arguments) existing.function.arguments += tc.function.arguments
+                    self.upsertChatToolCall(toolCallsMap, tc)
                 }
 
                 // 处理 reasoning_content 字段（优先）
@@ -1473,9 +2048,40 @@ export class OpenAIClient extends AbstractClient {
 
             // 处理完所有 chunk 后
 
+            if (useResponsesApi) {
+                const chatCompletion = self.responsesStreamStateToChatCompletion(responsesState)
+                const responseMessage = chatCompletion.choices?.[0]?.message || {}
+                if (responseMessage.content && responsesTextEmitted === 0) {
+                    yield { type: 'text', text: responseMessage.content }
+                }
+                const responseToolCalls = responseMessage.tool_calls || []
+                if (responseToolCalls.length > 0) {
+                    logger.debug(
+                        `[OpenAI适配器] Responses流式检测到 ${responseToolCalls.length} 个工具调用:`,
+                        responseToolCalls
+                            .map(t => t.function?.name)
+                            .filter(Boolean)
+                            .join(', ')
+                    )
+                    yield { type: 'tool_calls', toolCalls: responseToolCalls }
+                }
+                if (responseMessage.reasoning_content) {
+                    yield { type: 'reasoning', text: responseMessage.reasoning_content }
+                }
+                if (chatCompletion.usage && Object.keys(chatCompletion.usage).length > 0) {
+                    yield { type: 'usage', usage: attachUsageModel(chatCompletion.usage, chatCompletion.model) }
+                }
+                logger.debug(
+                    `[OpenAI适配器] Responses Stream完成: content=${responsesState.content.length}字符, toolCalls=${responseToolCalls.length}, usage=${JSON.stringify(chatCompletion.usage)}`
+                )
+                return
+            }
+
             // 输出 tool_calls
             if (hasToolCalls) {
-                const toolCalls = Array.from(toolCallsMap.values()).filter(tc => tc.id && tc.function.name)
+                const toolCalls = self.normalizeExecutableToolCalls(
+                    Array.from(toolCallsMap.values()).filter(tc => tc.id && tc.function.name)
+                )
                 if (toolCalls.length > 0) {
                     logger.debug(
                         `[OpenAI适配器] 流式检测到 ${toolCalls.length} 个工具调用:`,
@@ -1576,7 +2182,7 @@ export class OpenAIClient extends AbstractClient {
 
             // 输出usage信息
             if (finalUsage) {
-                yield { type: 'usage', usage: finalUsage }
+                yield { type: 'usage', usage: attachUsageModel(finalUsage, streamResponseModel) }
             }
 
             // 日志：流式结束

@@ -532,7 +532,8 @@ router.get('/config', groupAdminAuth, async (req, res) => {
                 tools: {
                     enabled: settings.toolsEnabled,
                     allowedTools: settings.allowedTools || [],
-                    blockedTools: settings.blockedTools || [],
+                    disabledTools: settings.disabledTools || settings.blockedTools || [],
+                    blockedTools: settings.blockedTools || settings.disabledTools || [],
                     autoApprove: settings.toolsAutoApprove ?? true,
                     maxCalls: settings.toolsMaxCalls ?? 5
                 },
@@ -716,7 +717,8 @@ router.put('/config', groupAdminAuth, async (req, res) => {
             // 工具配置
             toolsEnabled: body.tools?.enabled ?? body.toolsEnabled,
             allowedTools: body.tools?.allowedTools,
-            blockedTools: body.tools?.blockedTools,
+            disabledTools: body.tools?.disabledTools ?? body.tools?.blockedTools,
+            blockedTools: body.tools?.blockedTools ?? body.tools?.disabledTools,
             toolsAutoApprove: body.tools?.autoApprove,
             toolsMaxCalls: body.tools?.maxCalls,
             // 事件处理

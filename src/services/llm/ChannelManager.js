@@ -10,6 +10,7 @@ import config from '../../../config/config.js'
 import crypto from 'node:crypto'
 import { redisClient } from '../../core/cache/RedisClient.js'
 import { statsService } from '../stats/StatsService.js'
+import { normalizeAdvancedToolsConfig } from '../tools/ToolChoiceService.js'
 
 /**
  * @constant {Object} DEFAULT_BASE_URLS
@@ -94,6 +95,47 @@ function resolveChannelBaseUrls(raw) {
         urls = [String(raw.baseUrl).trim()]
     }
     return urls
+}
+
+function normalizeModelMappingTarget(target) {
+    if (Array.isArray(target)) {
+        return target.map(item => String(item || '').trim()).filter(Boolean)
+    }
+    if (typeof target === 'string') {
+        const value = target.trim()
+        return value ? [value] : []
+    }
+    return []
+}
+
+function normalizeModelMapping(mapping) {
+    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return {}
+    const normalized = {}
+    for (const [fromModel, target] of Object.entries(mapping)) {
+        const key = String(fromModel || '').trim()
+        if (!key) continue
+        const targets = normalizeModelMappingTarget(target)
+        if (targets.length === 1) {
+            normalized[key] = targets[0]
+        } else if (targets.length > 1) {
+            normalized[key] = targets
+        }
+    }
+    return normalized
+}
+
+function pickModelMappingTarget(channel, mappingKey, target) {
+    const targets = normalizeModelMappingTarget(target)
+    if (targets.length === 0) return null
+    if (targets.length === 1) return targets[0]
+
+    if (!channel._modelMappingIndexes || typeof channel._modelMappingIndexes !== 'object') {
+        channel._modelMappingIndexes = {}
+    }
+    const index = channel._modelMappingIndexes[mappingKey] || 0
+    const selected = targets[index % targets.length]
+    channel._modelMappingIndexes[mappingKey] = (index + 1) % targets.length
+    return selected
 }
 
 // APIKey轮询策略
@@ -421,6 +463,7 @@ export class ChannelManager {
                 openaiApiInterface: channelConfig.apiInterface || channelConfig.openaiApiInterface || 'chat',
                 responsePath: channelConfig.responsePath || channelConfig.endpoints?.responses || '',
                 experimental: channelConfig.experimental || {},
+                openaiResponses: channelConfig.openaiResponses || {},
                 // 自定义路径配置
                 chatPath: channelConfig.chatPath || '',
                 modelsPath: channelConfig.modelsPath || '',
@@ -428,7 +471,10 @@ export class ChannelManager {
                 apiKeys: this.normalizeApiKeys(channelConfig.apiKeys || []),
                 strategy: channelConfig.strategy || KeyStrategy.ROUND_ROBIN,
                 // 拓展覆盖配置
-                overrides: channelConfig.overrides || {},
+                overrides: {
+                    ...(channelConfig.overrides || {}),
+                    modelMapping: normalizeModelMapping(channelConfig.overrides?.modelMapping || {})
+                },
                 endpoints: channelConfig.endpoints || {},
                 auth: channelConfig.auth || { type: 'bearer' },
                 // 图片处理配置
@@ -488,7 +534,7 @@ export class ChannelManager {
         const src = advanced || {}
         return {
             streaming: {
-                enabled: src.streaming?.enabled !== false,
+                enabled: src.streaming?.enabled === true,
                 chunkSize: src.streaming?.chunkSize || 1024
             },
             thinking: {
@@ -496,6 +542,11 @@ export class ChannelManager {
                 defaultLevel: src.thinking?.defaultLevel || 'medium',
                 adaptThinking: src.thinking?.adaptThinking !== false,
                 sendThinkingAsMessage: src.thinking?.sendThinkingAsMessage || false,
+                reasoningBudgetTokens:
+                    Number.isFinite(Number(src.thinking?.reasoningBudgetTokens)) &&
+                    Number(src.thinking.reasoningBudgetTokens) > 0
+                        ? Number(src.thinking.reasoningBudgetTokens)
+                        : undefined,
                 /** auto: 按 baseUrl 识别 BigModel/智谱并附加 thinking.type；glm: 始终附加；off: 不附加 */
                 vendorThinkingControl: ['auto', 'off', 'glm'].includes(src.thinking?.vendorThinkingControl)
                     ? src.thinking.vendorThinkingControl
@@ -509,7 +560,8 @@ export class ChannelManager {
                 presencePenalty: src.llm?.presencePenalty ?? 0,
                 /* 字符上限，0 表示不限制 */
                 maxCharacters: src.llm?.maxCharacters || 0
-            }
+            },
+            tools: normalizeAdvancedToolsConfig(src.tools)
         }
     }
 
@@ -597,6 +649,7 @@ export class ChannelManager {
             openaiApiInterface: channelData.apiInterface || channelData.openaiApiInterface || 'chat',
             responsePath: channelData.responsePath || channelData.endpoints?.responses || '',
             experimental: channelData.experimental || {},
+            openaiResponses: channelData.openaiResponses || {},
             chatPath: channelData.chatPath || '',
             modelsPath: channelData.modelsPath || '',
             overrides: {
@@ -609,8 +662,8 @@ export class ChannelManager {
                 stopSequences: channelData.overrides?.stopSequences || [], // 停止序列
                 systemPromptPrefix: channelData.overrides?.systemPromptPrefix || '', // 系统提示前缀
                 systemPromptSuffix: channelData.overrides?.systemPromptSuffix || '', // 系统提示后缀
-                modelMapping: channelData.overrides?.modelMapping || {},
-                ...(channelData.overrides || {})
+                ...(channelData.overrides || {}),
+                modelMapping: normalizeModelMapping(channelData.overrides?.modelMapping || {})
             },
             endpoints: {
                 chat: channelData.endpoints?.chat || '', // 聊天端点，如 /chat/completions
@@ -697,6 +750,7 @@ export class ChannelManager {
             'openaiApiInterface',
             'responsePath',
             'experimental',
+            'openaiResponses',
             'timeout',
             'retry',
             'quota',
@@ -731,6 +785,11 @@ export class ChannelManager {
                     }
                 } else if (field === 'advanced') {
                     channel.advanced = this.normalizeAdvanced(updates.advanced)
+                } else if (field === 'overrides') {
+                    channel.overrides = {
+                        ...(updates.overrides || {}),
+                        modelMapping: normalizeModelMapping(updates.overrides?.modelMapping || {})
+                    }
                 } else {
                     channel[field] = updates[field]
                 }
@@ -745,6 +804,7 @@ export class ChannelManager {
         }
         channel.responsePath = channel.responsePath || channel.endpoints.responses || ''
         channel.experimental = channel.experimental || {}
+        channel.openaiResponses = channel.openaiResponses || {}
         if (channel.apiInterface !== 'responses' && channel.experimental.ws?.enabled) {
             channel.experimental = {
                 ...channel.experimental,
@@ -1176,10 +1236,12 @@ export class ChannelManager {
                             channelId: id,
                             channelName: channel.name,
                             model: testModel,
+                            reportedModel: response.model || null,
                             duration: Date.now() - testStartTime,
                             success: true,
                             source: 'health_check',
                             responseText: replyText,
+                            apiUsage: response.usage,
                             request: { messages: [{ role: 'user', content: '说一声你好' }], model: testModel }
                         })
                     } catch (e) {
@@ -1264,10 +1326,12 @@ export class ChannelManager {
                         channelId: id,
                         channelName: channel.name,
                         model: testModel,
+                        reportedModel: response.model || null,
                         duration: Date.now() - geminiStartTime,
                         success: true,
                         source: 'health_check',
                         responseText: replyText,
+                        apiUsage: response.usage,
                         request: { messages: [{ role: 'user', content: '说一声你好' }], model: testModel }
                     })
                 } catch (e) {
@@ -1322,10 +1386,12 @@ export class ChannelManager {
                         channelId: id,
                         channelName: channel.name,
                         model: testModel,
+                        reportedModel: response.model || null,
                         duration: Date.now() - claudeStartTime,
                         success: true,
                         source: 'health_check',
                         responseText: replyText,
+                        apiUsage: response.usage,
                         request: { messages: [{ role: 'user', content: '说一声你好' }], model: testModel }
                     })
                 } catch (e) {
@@ -1559,18 +1625,22 @@ export class ChannelManager {
         }
 
         if (modelMapping[requestedModel]) {
-            const actualModel = modelMapping[requestedModel]
-            logger.debug(`[ChannelManager] 模型映射: ${requestedModel} -> ${actualModel} (渠道: ${channel.name})`)
-            return { actualModel, originalModel: requestedModel, mapped: true }
+            const actualModel = pickModelMappingTarget(channel, requestedModel, modelMapping[requestedModel])
+            if (actualModel) {
+                logger.debug(`[ChannelManager] 模型映射: ${requestedModel} -> ${actualModel} (渠道: ${channel.name})`)
+                return { actualModel, originalModel: requestedModel, mapped: true }
+            }
         }
         for (const [pattern, target] of Object.entries(modelMapping)) {
             if (pattern.includes('*')) {
                 const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$', 'i')
                 if (regex.test(requestedModel)) {
+                    const actualModel = pickModelMappingTarget(channel, pattern, target)
+                    if (!actualModel) continue
                     logger.debug(
-                        `[ChannelManager] 模型映射(通配符): ${requestedModel} -> ${target} (渠道: ${channel.name})`
+                        `[ChannelManager] 模型映射(通配符): ${requestedModel} -> ${actualModel} (渠道: ${channel.name})`
                     )
-                    return { actualModel: target, originalModel: requestedModel, mapped: true }
+                    return { actualModel, originalModel: requestedModel, mapped: true }
                 }
             }
         }
@@ -1601,7 +1671,7 @@ export class ChannelManager {
         if (!channel.overrides) {
             channel.overrides = {}
         }
-        channel.overrides.modelMapping = mapping || {}
+        channel.overrides.modelMapping = normalizeModelMapping(mapping || {})
 
         await this.saveToConfig()
         logger.info(`[ChannelManager] 更新渠道 ${channel.name} 的模型映射: ${JSON.stringify(mapping)}`)
@@ -1626,7 +1696,11 @@ export class ChannelManager {
             channel.overrides.modelMapping = {}
         }
 
-        channel.overrides.modelMapping[fromModel] = toModel
+        const key = String(fromModel || '').trim()
+        if (!key) return false
+        const targets = normalizeModelMappingTarget(toModel)
+        if (targets.length === 0) return false
+        channel.overrides.modelMapping[key] = targets.length === 1 ? targets[0] : targets
         await this.saveToConfig()
         logger.info(`[ChannelManager] 渠道 ${channel.name} 添加模型映射: ${fromModel} -> ${toModel}`)
         return true
@@ -2141,6 +2215,7 @@ export class ChannelManager {
                 openaiApiInterface: ch.openaiApiInterface,
                 responsePath: ch.responsePath,
                 experimental: ch.experimental,
+                openaiResponses: ch.openaiResponses,
                 overrides: ch.overrides,
                 imageConfig: ch.imageConfig,
                 // 自定义路径配置

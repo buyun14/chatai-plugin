@@ -4,6 +4,18 @@ import {
     registerFromChaiteToolConverter,
     registerIntoChaiteConverter
 } from '../../utils/converter.js'
+import { toGeminiTool } from '../tooling.js'
+
+function parseFunctionArgs(args) {
+    if (args === undefined || args === null) return {}
+    if (typeof args !== 'string') return args && typeof args === 'object' ? args : { value: args }
+    try {
+        const parsed = JSON.parse(args)
+        return parsed && typeof parsed === 'object' ? parsed : { value: parsed }
+    } catch {
+        return { input: args }
+    }
+}
 
 /**
  * Convert Chaite IMessage to Gemini format
@@ -24,7 +36,7 @@ registerFromChaiteConverter('gemini', source => {
                     parts.push({
                         functionCall: {
                             name: toolCall.function.name,
-                            args: toolCall.function.arguments
+                            args: parseFunctionArgs(toolCall.function.arguments)
                         }
                     })
                 }
@@ -210,11 +222,7 @@ registerIntoChaiteConverter('gemini', response => {
  * Convert Chaite Tool to Gemini format
  */
 registerFromChaiteToolConverter('gemini', tool => {
-    return {
-        name: tool.function.name,
-        description: tool.function.description,
-        parameters: tool.function.parameters
-    }
+    return toGeminiTool(tool)
 })
 
 export {}

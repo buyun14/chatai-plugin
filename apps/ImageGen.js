@@ -1386,6 +1386,7 @@ export class ImageGen extends plugin {
                                     channelId: `imagegen-api${apiIndex}`,
                                     channelName: apiConf.name || `绘图API${apiIndex + 1}`,
                                     model: apiConf.model,
+                                    reportedModel: data.model || data.usage?.model || null,
                                     inputTokens,
                                     outputTokens,
                                     duration: Date.now() - startTime,

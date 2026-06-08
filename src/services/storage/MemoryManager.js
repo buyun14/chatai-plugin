@@ -256,11 +256,13 @@ ${dialogText}
                     channelId: channelInfo.id || 'memory',
                     channelName: channelInfo.name || '记忆服务',
                     model,
+                    reportedModel: result.model || null,
                     duration: Date.now() - startTime,
                     success: recordSuccess,
                     source: '群记忆总结',
                     groupId,
                     responseText,
+                    apiUsage: result.usage,
                     request: { messages: [{ role: 'user', content: prompt }], model },
                     response: !recordSuccess ? { error: '响应为空' } : null
                 })
@@ -642,11 +644,13 @@ ${dialogText}
                     channelId: channelInfo2.id || 'memory',
                     channelName: channelInfo2.name || '记忆服务',
                     model: model2,
+                    reportedModel: result.model || null,
                     duration: Date.now() - startTime2,
                     success: recordSuccess,
                     source: '记忆总结',
                     userId,
                     responseText,
+                    apiUsage: result.usage,
                     request: { messages: [{ role: 'user', content: prompt }], model: model2 },
                     response: !recordSuccess ? { error: '响应为空或无效' } : null
                 })
@@ -797,11 +801,13 @@ ${existingMemoryList || '暂无'}
                     channelId: channelInfo3.id || 'memory',
                     channelName: channelInfo3.name || '记忆服务',
                     model: model3,
+                    reportedModel: result.model || null,
                     duration: Date.now() - startTime3,
                     success: recordSuccess,
                     source: '记忆提取',
                     userId,
                     responseText: responseText || '',
+                    apiUsage: result.usage,
                     request: { messages: [{ role: 'user', content: extractPrompt }], model: model3 },
                     response: !recordSuccess ? { error: '响应为空' } : null
                 })
@@ -1271,11 +1277,13 @@ ${dialogText}
                     channelId: channelInfo.id || 'memory',
                     channelName: channelInfo.name || '记忆服务',
                     model: usedModel,
+                    reportedModel: result.model || null,
                     duration: Date.now() - startApiTime,
                     success: !!responseText && responseText !== '无',
                     source: '时间段记忆总结',
                     groupId,
                     responseText,
+                    apiUsage: result.usage,
                     request: { model: usedModel, timeRange: timeRangeMinutes }
                 })
             } catch (e) {

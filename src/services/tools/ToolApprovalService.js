@@ -1,7 +1,9 @@
 import crypto from 'node:crypto'
 import config from '../../../config/config.js'
 import { chatLogger as logger } from '../../core/utils/logger.js'
+import { getToolDefinitionName, getToolIdentity } from '../../core/adapters/tooling.js'
 import { toolFilterService } from './ToolFilterService.js'
+import { resolveToolPermission } from './ToolPermission.js'
 
 const RISK_ORDER = { low: 0, medium: 1, high: 2 }
 const VALID_MODES = ['ask', 'auto', 'confirm_all', 'yolo']
@@ -62,6 +64,21 @@ const DEFAULT_HIGH_RISK_TOOLS = new Set([
     'execute_command'
 ])
 
+function getUniqueToolByName(tools, name) {
+    if (!name || !Array.isArray(tools)) return null
+    const matches = tools.filter(tool => getToolDefinitionName(tool) === name)
+    return matches.length === 1 ? matches[0] : null
+}
+
+function getToolByIdentityOrUniqueName(tools, identity, name) {
+    if (!Array.isArray(tools)) return null
+    if (identity) {
+        const identityMatch = tools.find(tool => getToolIdentity(tool) === identity)
+        if (identityMatch) return identityMatch
+    }
+    return getUniqueToolByName(tools, name)
+}
+
 class ToolApprovalService {
     constructor() {
         this.pendingApprovals = new Map()
@@ -90,6 +107,11 @@ class ToolApprovalService {
         return ['low', 'medium', 'high'].includes(risk) ? risk : 'medium'
     }
 
+    listMatches(list, ...values) {
+        if (!Array.isArray(list) || list.length === 0) return false
+        return values.filter(Boolean).some(value => list.includes(value))
+    }
+
     normalizeToolCall(toolCall) {
         const name = toolCall.function?.name || toolCall.name || 'unknown_tool'
         let args = toolCall.function?.arguments ?? toolCall.arguments ?? {}
@@ -106,15 +128,16 @@ class ToolApprovalService {
 
     classifyRisk(toolName, tool = null) {
         const cfg = this.getConfig()
-        if (cfg.approvalHighRiskTools.includes(toolName)) return 'high'
-        if (cfg.approvalMediumRiskTools.includes(toolName)) return 'medium'
-        if (cfg.approvalLowRiskTools.includes(toolName)) return 'low'
+        const identity = getToolIdentity(tool) || ''
+        if (this.listMatches(cfg.approvalHighRiskTools, toolName, identity)) return 'high'
+        if (this.listMatches(cfg.approvalMediumRiskTools, toolName, identity)) return 'medium'
+        if (this.listMatches(cfg.approvalLowRiskTools, toolName, identity)) return 'low'
 
         const dangerousTools = config.get('builtinTools.dangerousTools') || []
         if (
             tool?.dangerous ||
             tool?.function?.dangerous ||
-            dangerousTools.includes(toolName) ||
+            this.listMatches(dangerousTools, toolName, identity) ||
             DEFAULT_HIGH_RISK_TOOLS.has(toolName)
         ) {
             return 'high'
@@ -165,23 +188,23 @@ class ToolApprovalService {
         return `${conversationId}:${groupId}:${userId}`
     }
 
-    getBypassKey(options, toolName) {
-        return `${this.getScopeKey(options)}:${toolName}`
+    getBypassKey(options, toolKey) {
+        return `${this.getScopeKey(options)}:${toolKey}`
     }
 
     canSessionBypass(risk, cfg = this.getConfig()) {
         return cfg.approvalAllowSessionBypass && RISK_ORDER[risk] <= RISK_ORDER[cfg.approvalSessionBypassMaxRisk]
     }
 
-    isSessionBypassed(options, toolName, risk) {
+    isSessionBypassed(options, toolKey, risk) {
         if (!this.canSessionBypass(risk)) return false
-        return this.sessionBypass.has(this.getBypassKey(options, toolName))
+        return this.sessionBypass.has(this.getBypassKey(options, toolKey))
     }
 
     addSessionBypass(options, items) {
         for (const item of items) {
             if (this.canSessionBypass(item.risk)) {
-                this.sessionBypass.set(this.getBypassKey(options, item.name), Date.now())
+                this.sessionBypass.set(this.getBypassKey(options, item.identity || item.name), Date.now())
             }
         }
     }
@@ -258,21 +281,24 @@ class ToolApprovalService {
         const blockedResults = []
         const needsApproval = []
         const presetId = options.presetId || 'default'
-        const userPermission = options.userPermission || options.event?.sender?.role || 'member'
+        const userPermission = resolveToolPermission(options)
         const context = {
             groupId: options.groupId || options.event?.group_id,
             userId: options.userId || options.event?.user_id
         }
 
-        const availableToolNames = new Set(
-            (options.availableTools || []).map(t => t.function?.name || t.name).filter(Boolean)
-        )
+        const availableTools = options.availableTools || []
+        const availableToolNames = new Set(availableTools.map(getToolDefinitionName).filter(Boolean))
+        const availableToolIdentities = new Set(availableTools.map(getToolIdentity).filter(Boolean))
 
         for (const toolCall of toolCalls || []) {
             const normalized = this.normalizeToolCall(toolCall)
+            const normalizedIdentity = getToolIdentity(toolCall) || normalized.name
             if (
                 normalized.name === 'unknown_tool' ||
-                (availableToolNames.size > 0 && !availableToolNames.has(normalized.name))
+                (availableToolNames.size > 0 &&
+                    !availableToolNames.has(normalized.name) &&
+                    !availableToolIdentities.has(normalizedIdentity))
             ) {
                 const reason =
                     normalized.name === 'unknown_tool'
@@ -282,10 +308,18 @@ class ToolApprovalService {
                 continue
             }
 
+            const tool = getToolByIdentityOrUniqueName(availableTools, normalizedIdentity, normalized.name)
+            if (!tool && availableTools.filter(t => getToolDefinitionName(t) === normalized.name).length > 1) {
+                blockedResults.push(
+                    this.createToolResult(toolCall, normalized.name, `工具未执行：无法唯一定位工具 ${normalized.name}`)
+                )
+                continue
+            }
             const access = toolFilterService.checkToolAccess(normalized.name, presetId, {
                 userPermission,
                 groupId: context.groupId,
-                userId: context.userId
+                userId: context.userId,
+                tool
             })
             if (!access.allowed) {
                 blockedResults.push(this.createToolResult(toolCall, normalized.name, `工具未执行：${access.reason}`))
@@ -300,10 +334,8 @@ class ToolApprovalService {
                 continue
             }
 
-            const tool = options.availableTools?.find?.(
-                t => t.function?.name === normalized.name || t.name === normalized.name
-            )
             const risk = this.classifyRisk(normalized.name, tool)
+            normalized.identity = getToolIdentity(tool) || normalizedIdentity
             normalized.risk = risk
             normalized.summary = this.summarizeArgs(normalized.args)
 
@@ -311,11 +343,11 @@ class ToolApprovalService {
                 blockedResults.push(this.createToolResult(toolCall, normalized.name, 'ask 模式不执行工具'))
                 continue
             }
-            if (mode === 'yolo' || cfg.approvalBypassTools.includes(normalized.name)) {
+            if (mode === 'yolo' || this.listMatches(cfg.approvalBypassTools, normalized.name, normalized.identity)) {
                 passThrough.push(toolCall)
                 continue
             }
-            if (this.isSessionBypassed(options, normalized.name, risk)) {
+            if (this.isSessionBypassed(options, normalized.identity || normalized.name, risk)) {
                 passThrough.push(toolCall)
                 continue
             }
