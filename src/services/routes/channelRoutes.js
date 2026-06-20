@@ -47,6 +47,7 @@ async function createChannelTestClient({ adapterType, apiKey, baseUrl, channel =
         customHeaders: channel.customHeaders || {},
         headersTemplate: channel.headersTemplate || '',
         requestBodyTemplate: channel.requestBodyTemplate || '',
+        systemPromptConfig: channel.systemPromptConfig || null,
         imageConfig: channel.imageConfig || {},
         enableReasoning: thinkingOptions.enableReasoning,
         reasoningEffort: thinkingOptions.reasoningEffort,
@@ -211,6 +212,7 @@ router.post('/test', async (req, res) => {
     let headersTemplate = ''
     let requestBodyTemplate = ''
     let imageConfig = {}
+    let systemPromptConfig = null
     if (id) {
         const channel = channelManager.get(id)
         if (channel) {
@@ -218,6 +220,7 @@ router.post('/test', async (req, res) => {
             headersTemplate = channel.headersTemplate || ''
             requestBodyTemplate = channel.requestBodyTemplate || ''
             imageConfig = channel.imageConfig || {}
+            systemPromptConfig = channel.systemPromptConfig || null
         }
     }
 
@@ -227,7 +230,14 @@ router.post('/test', async (req, res) => {
             adapterType,
             apiKey: apiKey || (adapterType === 'openai' ? config.get('openai.apiKey') : ''),
             baseUrl: baseUrl || (adapterType === 'openai' ? config.get('openai.baseUrl') : ''),
-            channel: { ...channel, customHeaders, headersTemplate, requestBodyTemplate, imageConfig },
+            channel: {
+                ...channel,
+                customHeaders,
+                headersTemplate,
+                requestBodyTemplate,
+                imageConfig,
+                systemPromptConfig
+            },
             overrides: {
                 chatPath,
                 responsePath,
@@ -262,6 +272,8 @@ router.post('/test', async (req, res) => {
             model: actualTestModel,
             maxToken: maxTokens,
             temperature,
+            systemPromptConfig: systemPromptConfig || undefined,
+            systemOverride: systemPromptConfig?.mode === 'replace' ? systemPromptConfig.override || '' : undefined,
             enableReasoning: thinkingOptions.enableReasoning,
             reasoningEffort: thinkingOptions.reasoningEffort,
             thinkingVendorControl: thinkingOptions.thinkingVendorControl,
@@ -508,6 +520,11 @@ router.post('/batch-test', async (req, res) => {
                     model: actualModel,
                     maxToken: 50,
                     temperature: 0.7,
+                    systemPromptConfig: channel.systemPromptConfig || undefined,
+                    systemOverride:
+                        channel.systemPromptConfig?.mode === 'replace'
+                            ? channel.systemPromptConfig.override || ''
+                            : undefined,
                     enableReasoning: thinkingOptions.enableReasoning,
                     reasoningEffort: thinkingOptions.reasoningEffort,
                     thinkingVendorControl: thinkingOptions.thinkingVendorControl,
@@ -606,6 +623,11 @@ router.post('/test-model', async (req, res) => {
                 model: actualModel,
                 maxToken: 50,
                 temperature: 0.7,
+                systemPromptConfig: channel.systemPromptConfig || undefined,
+                systemOverride:
+                    channel.systemPromptConfig?.mode === 'replace'
+                        ? channel.systemPromptConfig.override || ''
+                        : undefined,
                 enableReasoning: thinkingOptions.enableReasoning,
                 reasoningEffort: thinkingOptions.reasoningEffort,
                 thinkingVendorControl: thinkingOptions.thinkingVendorControl,

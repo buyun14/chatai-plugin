@@ -43,6 +43,7 @@ export class BaseClientOptions {
             if (options.customHeaders) this.customHeaders = options.customHeaders
             if (options.headersTemplate) this.headersTemplate = options.headersTemplate
             if (options.requestBodyTemplate) this.requestBodyTemplate = options.requestBodyTemplate
+            if (options.systemPromptConfig) this.systemPromptConfig = options.systemPromptConfig
             if (options.chatPath) this.chatPath = options.chatPath
             if (options.modelsPath) this.modelsPath = options.modelsPath
             if (options.responsePath) this.responsePath = options.responsePath

@@ -241,6 +241,72 @@ function validateAndCleanMessages(messages) {
     return cleaned
 }
 
+function normalizeChatCompletionMessages(messages) {
+    if (!Array.isArray(messages)) return messages
+
+    let normalizedCount = 0
+    const normalized = messages.map(message => {
+        if (!message || message.role !== 'developer') return message
+        normalizedCount += 1
+        return { ...message, role: 'system' }
+    })
+
+    if (normalizedCount > 0) {
+        logger.debug(`[OpenAI适配器] 不支持 developer 角色，已将 ${normalizedCount} 条消息降级为 system`)
+    }
+
+    return normalized
+}
+
+function resolveSystemPromptConfig(options = {}, clientOptions = {}) {
+    const raw = options.systemPromptConfig ?? clientOptions.systemPromptConfig
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+
+    return {
+        mode: raw.mode || 'inherit',
+        target: raw.target || 'messages',
+        fieldName: typeof raw.fieldName === 'string' ? raw.fieldName : '',
+        role: typeof raw.role === 'string' && raw.role.trim() ? raw.role.trim() : 'auto',
+        override: typeof raw.override === 'string' ? raw.override : '',
+        prefix: typeof raw.prefix === 'string' ? raw.prefix : '',
+        suffix: typeof raw.suffix === 'string' ? raw.suffix : ''
+    }
+}
+
+function resolveSystemPromptRole(systemPromptConfig, isThinkingModel) {
+    if (!systemPromptConfig || systemPromptConfig.role === 'auto') {
+        return isThinkingModel ? 'developer' : 'system'
+    }
+    return systemPromptConfig.role
+}
+
+function applySystemPromptRouting({ messages, requestPayload, systemPromptConfig, systemPrompt, isThinkingModel }) {
+    if (!systemPromptConfig || !systemPrompt) return
+
+    const target = systemPromptConfig.target || 'messages'
+    const role = resolveSystemPromptRole(systemPromptConfig, isThinkingModel)
+
+    if (target === 'instructions') {
+        requestPayload.instructions = systemPrompt
+        return
+    }
+
+    if (target === 'top_level_text' && systemPromptConfig.fieldName) {
+        requestPayload[systemPromptConfig.fieldName] = systemPrompt
+        return
+    }
+
+    if (target === 'top_level_object' && systemPromptConfig.fieldName) {
+        requestPayload[systemPromptConfig.fieldName] = {
+            role,
+            content: systemPrompt
+        }
+        return
+    }
+
+    messages.push({ role, content: systemPrompt })
+}
+
 /**
  * 递归清理工具定义中的 enum 值，确保都是字符串类型（Gemini API 要求）
  * @param {object} obj - 工具定义对象
@@ -541,6 +607,14 @@ export class OpenAIClient extends AbstractClient {
 
         if (requestPayload.max_completion_tokens || requestPayload.max_tokens) {
             payload.max_output_tokens = requestPayload.max_completion_tokens || requestPayload.max_tokens
+        }
+        const systemPromptConfig = resolveSystemPromptConfig(options, this.options)
+        if (
+            systemPromptConfig?.fieldName &&
+            (systemPromptConfig.target === 'top_level_text' || systemPromptConfig.target === 'top_level_object') &&
+            requestPayload[systemPromptConfig.fieldName] !== undefined
+        ) {
+            payload[systemPromptConfig.fieldName] = requestPayload[systemPromptConfig.fieldName]
         }
         Object.keys(payload).forEach(key => {
             if (payload[key] === undefined || payload[key] === null) delete payload[key]
@@ -1364,6 +1438,7 @@ export class OpenAIClient extends AbstractClient {
         const client = new OpenAI(clientOptions)
 
         const messages = []
+        const systemPromptConfig = resolveSystemPromptConfig(options, this.options)
 
         /*
          * 图片预处理：根据渠道 imageConfig.transferMode 决定处理方式
@@ -1386,7 +1461,7 @@ export class OpenAIClient extends AbstractClient {
         // Gemini模型不支持thinking model的特殊参数（developer角色、max_completion_tokens等）
         const isThinkingModel = !isGeminiModel && (enableReasoning || isThinkingModelFlag)
 
-        if (options.systemOverride) {
+        if (options.systemOverride && (!systemPromptConfig || systemPromptConfig.target === 'messages')) {
             if (isThinkingModel) {
                 messages.push({ role: 'developer', content: options.systemOverride })
             } else {
@@ -1453,6 +1528,16 @@ export class OpenAIClient extends AbstractClient {
             service_tier: options.serviceTier ?? options.service_tier,
             text: options.text,
             truncation: options.truncation
+        }
+
+        if (systemPromptConfig?.target && systemPromptConfig.target !== 'messages') {
+            applySystemPromptRouting({
+                messages: requestPayload.messages,
+                requestPayload,
+                systemPromptConfig,
+                systemPrompt: options.systemOverride,
+                isThinkingModel
+            })
         }
 
         if (isThinkingModel) {
@@ -1529,6 +1614,7 @@ export class OpenAIClient extends AbstractClient {
                         : this.responsesOutputToChatCompletion(response)
                 }
             } else {
+                requestPayload.messages = normalizeChatCompletionMessages(requestPayload.messages)
                 response = await client.chat.completions.create(requestPayload)
             }
 
@@ -1827,6 +1913,7 @@ export class OpenAIClient extends AbstractClient {
         const client = new OpenAI(clientOptions)
 
         const messages = []
+        const systemPromptConfig = resolveSystemPromptConfig(options, this.options)
         const model = options.model || 'gpt-4o-mini'
         const { enableReasoning, reasoningEffort, thinkingVendorControl, isThinkingModelFlag } =
             mergeOpenAIReasoningOptions(options, this.options)
@@ -1852,7 +1939,7 @@ export class OpenAIClient extends AbstractClient {
         // Gemini模型不支持thinking model的特殊参数（developer角色、max_completion_tokens等）
         const isThinkingModel = !isGeminiModel && (enableReasoning || isThinkingModelFlag)
 
-        if (options.systemOverride) {
+        if (options.systemOverride && (!systemPromptConfig || systemPromptConfig.target === 'messages')) {
             if (isThinkingModel) {
                 messages.push({ role: 'developer', content: options.systemOverride })
             } else {
@@ -1913,6 +2000,16 @@ export class OpenAIClient extends AbstractClient {
             truncation: options.truncation
         }
 
+        if (systemPromptConfig?.target && systemPromptConfig.target !== 'messages') {
+            applySystemPromptRouting({
+                messages: requestPayload.messages,
+                requestPayload,
+                systemPromptConfig,
+                systemPrompt: options.systemOverride,
+                isThinkingModel
+            })
+        }
+
         if (isThinkingModel) {
             requestPayload.max_completion_tokens = options.maxToken
             // Only add reasoning_effort if explicitly set, as not all APIs support it
@@ -1929,6 +2026,22 @@ export class OpenAIClient extends AbstractClient {
                 delete requestPayload[key]
             }
         })
+
+        const requestBodyTemplate = this.options?.requestBodyTemplate || options.requestBodyTemplate
+        if (requestBodyTemplate) {
+            const bodyOverrides = requestTemplateService.buildRequestBody(requestBodyTemplate, {
+                apiKey,
+                model,
+                baseUrl: this.baseUrl,
+                channelName: this.options?.channelName || '',
+                userAgent: this.options?.userAgent,
+                xff: this.options?.xff
+            })
+            if (bodyOverrides && typeof bodyOverrides === 'object') {
+                Object.assign(requestPayload, bodyOverrides)
+                logger.debug('[OpenAI适配器] 已应用流式请求体模板:', Object.keys(bodyOverrides).join(', '))
+            }
+        }
 
         applyVendorThinkingPayload(requestPayload, enableReasoning, this.baseUrl, thinkingVendorControl)
 
@@ -1949,6 +2062,7 @@ export class OpenAIClient extends AbstractClient {
                 responsesPayload.stream = true
                 stream = await client.responses.create(responsesPayload)
             } else {
+                requestPayload.messages = normalizeChatCompletionMessages(requestPayload.messages)
                 stream = await client.chat.completions.create(requestPayload)
             }
         } catch (error) {

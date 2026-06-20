@@ -7,6 +7,7 @@ import { channelManager } from './ChannelManager.js'
 import { getScopeManager } from '../scope/ScopeManager.js'
 import { databaseService } from '../storage/DatabaseService.js'
 import { resolveThinkingOptions } from './ThinkingOptions.js'
+import { normalizeSystemPromptConfig } from './SystemPromptConfig.js'
 import { resolveToolPermission } from '../tools/ToolPermission.js'
 
 let _scopeManager = null
@@ -218,6 +219,9 @@ export class LlmService {
         if (options.requestBodyTemplate) {
             clientConfig.requestBodyTemplate = options.requestBodyTemplate
         }
+        if (options.systemPromptConfig) {
+            clientConfig.systemPromptConfig = normalizeSystemPromptConfig(options.systemPromptConfig)
+        }
         if (options.channelName) {
             clientConfig.channelName = options.channelName
         }
@@ -275,6 +279,7 @@ export class LlmService {
             customHeaders: channel.customHeaders || {},
             headersTemplate: channel.headersTemplate || '',
             requestBodyTemplate: channel.requestBodyTemplate || '',
+            systemPromptConfig: normalizeSystemPromptConfig(channel.systemPromptConfig, channel.overrides),
             imageConfig: channel.imageConfig || {},
             channelId: channel.id,
             channelName: channel.name,
@@ -346,6 +351,7 @@ export class LlmService {
             customHeaders: channel.customHeaders || {},
             headersTemplate: channel.headersTemplate || '',
             requestBodyTemplate: channel.requestBodyTemplate || '',
+            systemPromptConfig: normalizeSystemPromptConfig(channel.systemPromptConfig, channel.overrides),
             channelId: channel.id,
             channelName: channel.name,
             features: ['chat'],

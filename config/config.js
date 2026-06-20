@@ -339,6 +339,15 @@ class Config {
              *   customHeaders: object,          // 自定义请求头
              *   headersTemplate: string,        // 请求头JSON模板（支持占位符）
              *   requestBodyTemplate: string,    // 请求体JSON模板（支持占位符）
+             *   systemPromptConfig: {           // 单渠道系统提示词传递策略（未配置则保持默认行为）
+             *     mode: string,                 // 'inherit' | 'replace' | 'disable'
+             *     target: string,               // 'messages' | 'instructions' | 'top_level_text' | 'top_level_object'
+             *     fieldName: string,            // target 为顶层字段模式时使用，例如 systeam
+             *     role: string,                 // 'auto' | 'system' | 'developer' | 自定义 role
+             *     override: string,             // 单渠道系统提示词覆盖
+             *     prefix: string,               // 系统提示前缀
+             *     suffix: string                // 系统提示后缀
+             *   },
              *   auth: {                         // 认证方式配置
              *     type: string,                 // 认证类型: 'bearer' | 'api-key' | 'custom'
              *     headerName: string,           // 自定义认证头名称

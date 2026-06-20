@@ -11,6 +11,7 @@ import crypto from 'node:crypto'
 import { redisClient } from '../../core/cache/RedisClient.js'
 import { statsService } from '../stats/StatsService.js'
 import { normalizeAdvancedToolsConfig } from '../tools/ToolChoiceService.js'
+import { normalizeSystemPromptConfig } from './SystemPromptConfig.js'
 
 /**
  * @constant {Object} DEFAULT_BASE_URLS
@@ -459,6 +460,10 @@ export class ChannelManager {
                 customHeaders: channelConfig.customHeaders || {},
                 headersTemplate: channelConfig.headersTemplate || '',
                 requestBodyTemplate: channelConfig.requestBodyTemplate || '',
+                systemPromptConfig: normalizeSystemPromptConfig(
+                    channelConfig.systemPromptConfig,
+                    channelConfig.overrides
+                ),
                 apiInterface: channelConfig.apiInterface || channelConfig.openaiApiInterface || 'chat',
                 openaiApiInterface: channelConfig.apiInterface || channelConfig.openaiApiInterface || 'chat',
                 responsePath: channelConfig.responsePath || channelConfig.endpoints?.responses || '',
@@ -645,6 +650,7 @@ export class ChannelManager {
             customHeaders: channelData.customHeaders || {},
             headersTemplate: channelData.headersTemplate || '',
             requestBodyTemplate: channelData.requestBodyTemplate || '',
+            systemPromptConfig: normalizeSystemPromptConfig(channelData.systemPromptConfig, channelData.overrides),
             apiInterface: channelData.apiInterface || channelData.openaiApiInterface || 'chat',
             openaiApiInterface: channelData.apiInterface || channelData.openaiApiInterface || 'chat',
             responsePath: channelData.responsePath || channelData.endpoints?.responses || '',
@@ -746,6 +752,7 @@ export class ChannelManager {
             'customHeaders',
             'headersTemplate',
             'requestBodyTemplate',
+            'systemPromptConfig',
             'apiInterface',
             'openaiApiInterface',
             'responsePath',
@@ -785,6 +792,11 @@ export class ChannelManager {
                     }
                 } else if (field === 'advanced') {
                     channel.advanced = this.normalizeAdvanced(updates.advanced)
+                } else if (field === 'systemPromptConfig') {
+                    channel.systemPromptConfig = normalizeSystemPromptConfig(
+                        updates.systemPromptConfig,
+                        updates.overrides || channel.overrides
+                    )
                 } else if (field === 'overrides') {
                     channel.overrides = {
                         ...(updates.overrides || {}),
@@ -1564,11 +1576,29 @@ export class ChannelManager {
                 enabled: true,
                 priority: best.priority || 100,
                 models: modelsList(best),
-                chatPath: best.chatPath || undefined,
-                modelsPath: best.modelsPath || undefined,
+                chatPath: best.chatPath || '',
+                modelsPath: best.modelsPath || '',
+                responsePath: best.responsePath || best.endpoints?.responses || '',
+                apiInterface: best.apiInterface || best.openaiApiInterface || 'chat',
+                openaiApiInterface: best.apiInterface || best.openaiApiInterface || 'chat',
+                endpoints: best.endpoints || {},
+                experimental: best.experimental || {},
+                openaiResponses: best.openaiResponses || {},
+                customHeaders: best.customHeaders || {},
+                headersTemplate: best.headersTemplate || '',
+                requestBodyTemplate: best.requestBodyTemplate || '',
                 imageConfig: best.imageConfig || {},
-                advanced: {},
-                overrides: {}
+                advanced: this.normalizeAdvanced(best.advanced),
+                overrides: {
+                    ...(best.overrides || {}),
+                    modelMapping: normalizeModelMapping(best.overrides?.modelMapping || {})
+                },
+                auth: best.auth || { type: 'bearer' },
+                timeout: best.timeout || { connect: 10000, read: 60000 },
+                retry: best.retry || { maxAttempts: 3, delay: 1000, backoff: 'exponential' },
+                quota: best.quota || { daily: 0, hourly: 0, perMinute: 0 },
+                weight: best.weight || 100,
+                systemPromptConfig: normalizeSystemPromptConfig(best.systemPromptConfig, best.overrides)
             }
             logger.info(`[ChannelManager] 群 ${groupId} 使用独立渠道: ${channel.name} (${channel.baseUrl})`)
             return { channel, source: 'group-independent-multi', model: resolvedModel }
@@ -1585,8 +1615,32 @@ export class ChannelManager {
                 enabled: true,
                 priority: 1000,
                 models: groupChannelConfig.modelId ? [groupChannelConfig.modelId] : [],
-                advanced: {},
-                overrides: {}
+                chatPath: groupChannelConfig.chatPath || '',
+                modelsPath: groupChannelConfig.modelsPath || '',
+                responsePath: groupChannelConfig.responsePath || groupChannelConfig.endpoints?.responses || '',
+                apiInterface: groupChannelConfig.apiInterface || groupChannelConfig.openaiApiInterface || 'chat',
+                openaiApiInterface: groupChannelConfig.apiInterface || groupChannelConfig.openaiApiInterface || 'chat',
+                endpoints: groupChannelConfig.endpoints || {},
+                experimental: groupChannelConfig.experimental || {},
+                openaiResponses: groupChannelConfig.openaiResponses || {},
+                customHeaders: groupChannelConfig.customHeaders || {},
+                headersTemplate: groupChannelConfig.headersTemplate || '',
+                requestBodyTemplate: groupChannelConfig.requestBodyTemplate || '',
+                imageConfig: groupChannelConfig.imageConfig || {},
+                advanced: this.normalizeAdvanced(groupChannelConfig.advanced),
+                overrides: {
+                    ...(groupChannelConfig.overrides || {}),
+                    modelMapping: normalizeModelMapping(groupChannelConfig.overrides?.modelMapping || {})
+                },
+                auth: groupChannelConfig.auth || { type: 'bearer' },
+                timeout: groupChannelConfig.timeout || { connect: 10000, read: 60000 },
+                retry: groupChannelConfig.retry || { maxAttempts: 3, delay: 1000, backoff: 'exponential' },
+                quota: groupChannelConfig.quota || { daily: 0, hourly: 0, perMinute: 0 },
+                weight: groupChannelConfig.weight || 100,
+                systemPromptConfig: normalizeSystemPromptConfig(
+                    groupChannelConfig.systemPromptConfig,
+                    groupChannelConfig.overrides
+                )
             }
             if (groupChannelConfig.modelId) {
                 resolvedModel = groupChannelConfig.modelId
@@ -2211,6 +2265,7 @@ export class ChannelManager {
                 // 请求头/请求体JSON模板
                 headersTemplate: ch.headersTemplate,
                 requestBodyTemplate: ch.requestBodyTemplate,
+                systemPromptConfig: ch.systemPromptConfig,
                 apiInterface: ch.apiInterface,
                 openaiApiInterface: ch.openaiApiInterface,
                 responsePath: ch.responsePath,

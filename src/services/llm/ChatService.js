@@ -21,6 +21,7 @@ import { statsService } from '../stats/StatsService.js'
 import { enforceMaxCharacters } from '../../utils/common.js'
 import { resolveConfiguredToolChoice } from '../tools/ToolChoiceService.js'
 import { resolveThinkingOptions as resolveConfiguredThinkingOptions } from './ThinkingOptions.js'
+import { resolveChannelSystemPrompt } from './SystemPromptConfig.js'
 import { applySkillToolConstraints, getSkillToolConstraints } from '../skills/SkillToolConstraints.js'
 import { resolveToolPermission } from '../tools/ToolPermission.js'
 
@@ -606,6 +607,9 @@ export class ChatService {
             if (channel.requestBodyTemplate) {
                 clientOptions.requestBodyTemplate = channel.requestBodyTemplate
             }
+            if (channel.systemPromptConfig) {
+                clientOptions.systemPromptConfig = channel.systemPromptConfig
+            }
             channelManager.startRequest(channel.id)
         }
 
@@ -905,6 +909,10 @@ export class ChatService {
         }
         let messages = []
         const shouldDisableSystemPrompt = currentPreset?.disableSystemPrompt === true
+        const baseSystemPrompt = systemPrompt
+        const resolveChannelPrompt = targetChannel => resolveChannelSystemPrompt(baseSystemPrompt, targetChannel)
+        const channelPromptState = resolveChannelPrompt(channel)
+        systemPrompt = channelPromptState.systemPrompt
         if (!shouldDisableSystemPrompt && systemPrompt && systemPrompt.trim()) {
             messages.push({ role: 'system', content: [{ type: 'text', text: systemPrompt }] })
         } else if (shouldDisableSystemPrompt) {
@@ -958,6 +966,7 @@ export class ChatService {
             topP: presetParams.top_p ?? presetParams.topP ?? channelLlm.topP,
             conversationId,
             systemOverride: systemPrompt,
+            systemPromptConfig: channelPromptState.systemPromptConfig,
             stream: useStreaming,
             disableHistoryRead: skipHistory,
             ...thinkingOptions,
@@ -1153,6 +1162,10 @@ export class ChatService {
                                 currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                             experimental: currentChannel.experimental || {},
                             openaiResponses: currentChannel.openaiResponses || {},
+                            customHeaders: currentChannel.customHeaders || {},
+                            headersTemplate: currentChannel.headersTemplate || '',
+                            requestBodyTemplate: currentChannel.requestBodyTemplate || '',
+                            systemPromptConfig: currentChannel.systemPromptConfig || null,
                             ...resolveThinkingOptions(currentChannel),
                             toolChoice: resolveToolChoiceForChannel(currentChannel)
                         }
@@ -1180,10 +1193,13 @@ export class ChatService {
                             const currentModelMapping = currentChannel
                                 ? channelManager.getActualModel(currentChannel.id, currentModel)
                                 : { actualModel: currentModel }
+                            const promptState = resolveChannelPrompt(currentChannel)
                             const currentRequestOptions = {
                                 ...requestOptions,
                                 ...resolveThinkingOptions(currentChannel),
                                 model: currentModelMapping.actualModel,
+                                systemOverride: promptState.systemPrompt,
+                                systemPromptConfig: promptState.systemPromptConfig,
                                 toolChoice: resolveToolChoiceForChannel(currentChannel)
                             }
                             response = await currentClient.sendMessage(userMessage, currentRequestOptions)
@@ -1259,6 +1275,11 @@ export class ChatService {
                                         ...clientOptions,
                                         apiKey: nextKey.key,
                                         keyIndex: nextKey.keyIndex,
+                                        customHeaders:
+                                            currentChannel?.customHeaders || clientOptions.customHeaders || {},
+                                        headersTemplate: currentChannel?.headersTemplate || '',
+                                        requestBodyTemplate: currentChannel?.requestBodyTemplate || '',
+                                        systemPromptConfig: currentChannel?.systemPromptConfig || null,
                                         toolChoice: resolveToolChoiceForChannel(currentChannel)
                                     }
                                     currentClient = await LlmService.createClient(newClientOptions)
@@ -1311,6 +1332,10 @@ export class ChatService {
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         experimental: altChannel.experimental || {},
                                         openaiResponses: altChannel.openaiResponses || {},
+                                        customHeaders: altChannel.customHeaders || {},
+                                        headersTemplate: altChannel.headersTemplate || '',
+                                        requestBodyTemplate: altChannel.requestBodyTemplate || '',
+                                        systemPromptConfig: altChannel.systemPromptConfig || null,
                                         ...resolveThinkingOptions(altChannel),
                                         toolChoice: resolveToolChoiceForChannel(altChannel)
                                     }
@@ -1401,6 +1426,11 @@ export class ChatService {
                                         ...clientOptions,
                                         apiKey: nextKey.key,
                                         keyIndex: nextKey.keyIndex,
+                                        customHeaders:
+                                            currentChannel?.customHeaders || clientOptions.customHeaders || {},
+                                        headersTemplate: currentChannel?.headersTemplate || '',
+                                        requestBodyTemplate: currentChannel?.requestBodyTemplate || '',
+                                        systemPromptConfig: currentChannel?.systemPromptConfig || null,
                                         toolChoice: resolveToolChoiceForChannel(currentChannel)
                                     }
                                     currentClient = await LlmService.createClient(newClientOptions)
@@ -1452,6 +1482,10 @@ export class ChatService {
                                             altChannel.apiInterface || altChannel.openaiApiInterface || 'chat',
                                         experimental: altChannel.experimental || {},
                                         openaiResponses: altChannel.openaiResponses || {},
+                                        customHeaders: altChannel.customHeaders || {},
+                                        headersTemplate: altChannel.headersTemplate || '',
+                                        requestBodyTemplate: altChannel.requestBodyTemplate || '',
+                                        systemPromptConfig: altChannel.systemPromptConfig || null,
                                         ...resolveThinkingOptions(altChannel),
                                         toolChoice: resolveToolChoiceForChannel(altChannel)
                                     }

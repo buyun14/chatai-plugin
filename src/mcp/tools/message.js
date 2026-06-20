@@ -3264,7 +3264,27 @@ export const messageTools = [
                 extra: { type: 'object', description: 'icqq 发包 extra 参数' },
                 packets: {
                     type: 'array',
-                    description: 'send_merge_uni 使用的包列表 [{cmd, body, body_encoding, need_response}]'
+                    description: 'send_merge_uni 使用的包列表 [{cmd, body, body_encoding, need_response}]',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            cmd: { type: 'string', description: '单个包使用的协议命令名' },
+                            body: {
+                                oneOf: [{ type: 'string' }, { type: 'object' }],
+                                description:
+                                    '单个包的包体数据，支持 base64/JSON 字符串或对象，默认按 body_encoding 解析'
+                            },
+                            pb_data: { type: 'string', description: 'body 的别名，可传 base64 或 JSON 字符串' },
+                            body_encoding: {
+                                type: 'string',
+                                enum: ['auto', 'base64', 'hex', 'json', 'text', 'utf8'],
+                                description: '单个包的包体编码，默认继承外层 body_encoding'
+                            },
+                            seq: { type: 'number', description: '单个包自定义 seq' },
+                            need_response: { type: 'boolean', description: '是否等待该包响应，默认 true' },
+                            needResp: { type: 'boolean', description: 'need_response 的兼容写法' }
+                        }
+                    }
                 },
                 params: { type: 'object', description: 'send_api/onebot 模式下透传给 bot.sendApi 的参数' },
                 action: { type: 'string', description: 'send_api/onebot 模式下调用的 API 名称，默认 send_pb_msg' },
@@ -3300,7 +3320,29 @@ export const messageTools = [
                 timeout: { type: 'number', description: '等待响应超时秒数，默认 6' },
                 seq: { type: 'number', description: 'sendPacket/writeUni 自定义 seq' },
                 extra: { type: 'object', description: 'icqq 发包 extra 参数' },
-                packets: { type: 'array', description: 'send_merge_uni 使用的包列表' },
+                packets: {
+                    type: 'array',
+                    description: 'send_merge_uni 使用的包列表',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            cmd: { type: 'string', description: '单个包使用的协议命令名' },
+                            body: {
+                                oneOf: [{ type: 'string' }, { type: 'object' }],
+                                description:
+                                    '单个包的包体数据，支持 base64/JSON 字符串或对象，默认按 body_encoding 解析'
+                            },
+                            pb_data: { type: 'string', description: 'body 的别名，可传 base64 或 JSON 字符串' },
+                            body_encoding: {
+                                type: 'string',
+                                description: '单个包的包体编码，默认继承外层 body_encoding'
+                            },
+                            seq: { type: 'number', description: '单个包自定义 seq' },
+                            need_response: { type: 'boolean', description: '是否等待该包响应，默认 true' },
+                            needResp: { type: 'boolean', description: 'need_response 的兼容写法' }
+                        }
+                    }
+                },
                 params: { type: 'object', description: 'send_api/onebot 模式下透传参数' },
                 action: { type: 'string', description: 'send_api/onebot 模式下调用的 API 名称' }
             }

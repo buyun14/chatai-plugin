@@ -18,6 +18,7 @@ import { enforceMaxCharacters } from '../../utils/common.js'
 import { SkillsAgent, convertMcpTools } from './SkillsAgent.js'
 import { resolveConfiguredToolChoice } from '../tools/ToolChoiceService.js'
 import { resolveThinkingOptions as resolveConfiguredThinkingOptions } from '../llm/ThinkingOptions.js'
+import { resolveChannelSystemPrompt } from '../llm/SystemPromptConfig.js'
 import { attachToolMetadata } from '../../core/adapters/tooling.js'
 import { applySkillToolConstraints, getSkillToolConstraints } from '../skills/SkillToolConstraints.js'
 import { resolveToolPermission } from '../tools/ToolPermission.js'
@@ -431,7 +432,11 @@ export class ChatAgent {
         })
 
         // 构建消息列表
+        const baseSystemPrompt = systemPrompt
+        const resolveChannelPrompt = targetChannel => resolveChannelSystemPrompt(baseSystemPrompt, targetChannel)
         let messages = []
+        const channelPromptState = resolveChannelPrompt(channel)
+        systemPrompt = channelPromptState.systemPrompt
         if (systemPrompt?.trim()) {
             messages.push({ role: 'system', content: [{ type: 'text', text: systemPrompt }] })
         }
@@ -488,6 +493,7 @@ export class ChatAgent {
             topP: presetParams.top_p ?? channelLlm.topP,
             conversationId,
             systemOverride: systemPrompt,
+            systemPromptConfig: channelPromptState.systemPromptConfig,
             stream: stream || channelStreaming.enabled === true,
             disableHistoryRead: skipHistory,
             ...thinkingOptions,
@@ -1175,6 +1181,15 @@ export class ChatAgent {
             if (channel.customHeaders) {
                 clientOptions.customHeaders = channel.customHeaders
             }
+            if (channel.headersTemplate) {
+                clientOptions.headersTemplate = channel.headersTemplate
+            }
+            if (channel.requestBodyTemplate) {
+                clientOptions.requestBodyTemplate = channel.requestBodyTemplate
+            }
+            if (channel.systemPromptConfig) {
+                clientOptions.systemPromptConfig = channel.systemPromptConfig
+            }
             // 传递图片处理配置
             if (channel.imageConfig) {
                 clientOptions.imageConfig = channel.imageConfig
@@ -1237,6 +1252,10 @@ export class ChatAgent {
                         openaiApiInterface: currentChannel.apiInterface || currentChannel.openaiApiInterface || 'chat',
                         experimental: currentChannel.experimental || {},
                         openaiResponses: currentChannel.openaiResponses || {},
+                        customHeaders: currentChannel.customHeaders || {},
+                        headersTemplate: currentChannel.headersTemplate || '',
+                        requestBodyTemplate: currentChannel.requestBodyTemplate || '',
+                        systemPromptConfig: currentChannel.systemPromptConfig || null,
                         ...resolveThinkingOptions(currentChannel),
                         toolChoice: resolveToolChoiceForChannel(currentChannel)
                     }
@@ -1250,10 +1269,13 @@ export class ChatAgent {
                     const mapping = currentChannel
                         ? channelManager.getActualModel(currentChannel.id, currentModel)
                         : { actualModel: currentModel }
+                    const promptState = resolveChannelPrompt(currentChannel)
                     const currentRequestOptions = {
                         ...requestOptions,
                         ...resolveThinkingOptions(currentChannel),
                         model: mapping.actualModel,
+                        systemOverride: promptState.systemPrompt,
+                        systemPromptConfig: promptState.systemPromptConfig,
                         toolChoice: resolveToolChoiceForChannel(currentChannel)
                     }
                     response = await currentClient.sendMessage(userMessage, currentRequestOptions)

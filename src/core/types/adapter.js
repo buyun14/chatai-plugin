@@ -9,6 +9,7 @@
  * @property {number} [temperature]
  * @property {number} [maxToken]
  * @property {string} [systemOverride]
+ * @property {Object} [systemPromptConfig]
  * @property {boolean} [disableHistoryRead]
  * @property {boolean} [disableHistorySave]
  * @property {string} [conversationId]
