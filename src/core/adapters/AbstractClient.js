@@ -1308,7 +1308,10 @@ export class AbstractClient {
                 }
             }
 
-            const modelResponse = await this._sendMessage(histories, apiKey, options)
+            const requestHistories = this.applyTextOnlyFilter(histories)
+            this.context.setHistoryMessages(requestHistories)
+
+            const modelResponse = await this._sendMessage(requestHistories, apiKey, options)
 
             // 保存用户请求
             if (thisRequestMsg && this.shouldPersistHistory(thisRequestMsg)) {
@@ -1498,6 +1501,72 @@ export class AbstractClient {
     }
 
     /**
+     * 仅文本模式下过滤掉非文本内容
+     * @param {IMessage[]} [messages]
+     * @returns {IMessage[]}
+     */
+    applyTextOnlyFilter(messages) {
+        if (this.options?.imageConfig?.textOnly !== true || !Array.isArray(messages)) {
+            return messages
+        }
+
+        let removedParts = 0
+        const filteredMessages = messages
+            .map(message => {
+                if (!message || !Array.isArray(message.content)) {
+                    return message
+                }
+
+                const filteredContent = message.content.filter(part => {
+                    const keep = this.isTextOnlyAllowedPart(part)
+                    if (!keep) {
+                        removedParts++
+                    }
+                    return keep
+                })
+
+                if (filteredContent.length === message.content.length) {
+                    return message
+                }
+
+                return {
+                    ...message,
+                    content: filteredContent
+                }
+            })
+            .filter(message => {
+                if (!message) {
+                    return false
+                }
+                if (message.role === 'tool') {
+                    return true
+                }
+                if ((message.toolCalls?.length ?? 0) > 0) {
+                    return true
+                }
+                return this.hasMeaningfulContent(message)
+            })
+
+        if (removedParts > 0) {
+            this.logger.debug(`[TextOnly] 已过滤 ${removedParts} 个非文本内容片段`)
+        }
+
+        return filteredMessages
+    }
+
+    /**
+     * 判断仅文本模式下是否保留当前消息片段
+     * @param {import('../types').MessageContent} [part]
+     * @returns {boolean}
+     */
+    isTextOnlyAllowedPart(part) {
+        if (!part) {
+            return false
+        }
+        return part.type === 'text' || part.type === 'reasoning' || part.type === 'tool'
+    }
+
+    /**
      * Check if message part is meaningful
      * @param {import('../types').MessageContent} [part]
      * @returns {boolean}
@@ -1542,7 +1611,7 @@ export class AbstractClient {
      */
     async sendMessageWithHistory(history, options) {
         const apiKey = await getKey(this.apiKey, this.multipleKeyStrategy || MultipleKeyStrategyChoice.RANDOM)
-        return this._sendMessage(history, apiKey, SendMessageOption.create(options))
+        return this._sendMessage(this.applyTextOnlyFilter(history), apiKey, SendMessageOption.create(options))
     }
 
     /**

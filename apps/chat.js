@@ -253,6 +253,14 @@ export class Chat extends plugin {
             const groupSettings = await scopeManager.getGroupSettings(String(groupId))
             const settings = groupSettings?.settings || {}
 
+            if (settings.enabled === false) {
+                return { allowed: false, reason: '本群已关闭AI响应' }
+            }
+
+            if (settings.chatEnabled === false) {
+                return { allowed: false, reason: '本群已关闭AI对话功能' }
+            }
+
             const listMode = settings.listMode || 'none'
             const blacklist = settings.blacklist || []
             const whitelist = settings.whitelist || []
